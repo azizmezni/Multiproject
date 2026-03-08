@@ -10,6 +10,33 @@ import { kb } from './keyboards.js';
 import { PROVIDER_REGISTRY } from './providers.js';
 import { workflows, NODE_TYPES } from './workflows.js';
 
+// Sanitize text for Telegram Markdown: escape unmatched special chars
+function sanitizeMd(text) {
+  // Replace problematic markdown that Telegram can't parse
+  // Keep bold (*text*) but escape lone asterisks/underscores
+  let s = text;
+  // Fix unmatched code blocks
+  const tripleCount = (s.match(/```/g) || []).length;
+  if (tripleCount % 2 !== 0) s += '\n```';
+  const singleCount = (s.match(/(?<!`)`(?!`)/g) || []).length;
+  if (singleCount % 2 !== 0) s = s.replace(/`([^`]*)$/, '`$1`');
+  return s;
+}
+
+// Send a message safely — tries Markdown, falls back to plain text
+async function safeSend(ctx, text, extra = {}) {
+  try {
+    return await ctx.reply(sanitizeMd(text), { parse_mode: 'Markdown', ...extra });
+  } catch (err) {
+    if (err.message && err.message.includes("can't parse entities")) {
+      // Strip all markdown and send as plain text
+      const plain = text.replace(/\*\*/g, '').replace(/\*/g, '').replace(/_/g, '').replace(/`/g, '');
+      return await ctx.reply(plain, extra);
+    }
+    throw err;
+  }
+}
+
 export function createBot(token) {
   const bot = new Telegraf(token);
 
@@ -704,10 +731,28 @@ Format with clear markdown headers and numbered plans.` },
       ]);
 
       drafts.updateContent(draft.id, draft.title, result.text, draft.content || pageContent);
-      await ctx.reply(
-        `\ud83d\udca1 *Plans for: ${draft.title}*\n\n${result.text.substring(0, 3500)}`,
-        { parse_mode: 'Markdown', ...kb.draftActions(draft.id) }
-      );
+
+      // Split long responses into chunks to avoid Telegram 4096 char limit
+      const fullText = result.text;
+      const header = `\ud83d\udca1 *Plans for: ${draft.title}*\n\n`;
+      const maxLen = 3800;
+
+      if ((header + fullText).length <= maxLen) {
+        await safeSend(ctx, header + fullText, kb.draftActions(draft.id));
+      } else {
+        // Send in chunks
+        const chunks = [];
+        let remaining = fullText;
+        while (remaining.length > 0) {
+          chunks.push(remaining.substring(0, maxLen));
+          remaining = remaining.substring(maxLen);
+        }
+        for (let i = 0; i < chunks.length; i++) {
+          const prefix = i === 0 ? header : '';
+          const extra = i === chunks.length - 1 ? kb.draftActions(draft.id) : {};
+          await safeSend(ctx, prefix + chunks[i], extra);
+        }
+      }
     } catch (err) {
       await ctx.reply(`\u274c Error: ${err.message}`);
     }
@@ -985,7 +1030,7 @@ Format with clear markdown headers and numbered plans.` },
           { role: 'system', content: `You are helping with a project task.\nTask: ${task.title}\nDescription: ${task.description}` },
           { role: 'user', content: text },
         ]);
-        await ctx.reply(`\ud83d\udcac ${result.text}\n\n_via ${result.provider}_`, { parse_mode: 'Markdown', ...kb.taskDetail(task) });
+        await safeSend(ctx, `\ud83d\udcac ${result.text}\n\n_via ${result.provider}_`, kb.taskDetail(task));
       } catch (err) {
         await ctx.reply(`\u274c Error: ${err.message}`);
       }
@@ -1043,11 +1088,11 @@ Format with clear markdown headers and numbered plans.` },
       const meta = await fetchLinkMeta(url);
       const draft = drafts.add(userId, url, meta.title, meta.description, meta.bodyText || '');
 
-      return ctx.reply(
+      return safeSend(ctx,
         `\ud83d\udce5 *Saved to Drafts*\n\n` +
         `*${meta.title}*\n${meta.description ? meta.description.substring(0, 200) : 'No description'}\n\n` +
         `What would you like to do?`,
-        { parse_mode: 'Markdown', ...kb.draftActions(draft.id) }
+        kb.draftActions(draft.id)
       );
     }
 
@@ -1070,7 +1115,7 @@ Format with clear markdown headers and numbered plans.` },
       if (response.length > 4000) response = response.substring(0, 4000) + '\n\n...(truncated)';
       response += `\n\n_${result.provider} \u2022 ${result.model}_`;
 
-      await ctx.reply(response, { parse_mode: 'Markdown' });
+      await safeSend(ctx, response);
     } catch (err) {
       await ctx.reply(`\u274c ${err.message}`);
     }
@@ -1091,7 +1136,7 @@ Format with clear markdown headers and numbered plans.` },
 
       await ctx.sendChatAction('typing');
       const result = await llm.vision(userId, base64, caption);
-      await ctx.reply(`${result.text}\n\n_${result.provider} \u2022 ${result.model}_`, { parse_mode: 'Markdown' });
+      await safeSend(ctx, `${result.text}\n\n_${result.provider} \u2022 ${result.model}_`);
     } catch (err) {
       await ctx.reply(`\u274c Vision error: ${err.message}`);
     }
