@@ -250,6 +250,25 @@ export function createDashboard(port = 9999) {
     }
   });
 
+  // Generate a script for a node using LLM
+  app.post('/api/workflows/nodes/:id/generate', async (req, res) => {
+    const userId = getUserId(req);
+    llm.initDefaults(userId);
+    try {
+      const result = await workflows.generateScript(userId, parseInt(req.params.id));
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Save a custom script to a node
+  app.put('/api/workflows/nodes/:id/script', (req, res) => {
+    const nodeId = parseInt(req.params.id);
+    workflows.saveScript(nodeId, req.body.script);
+    res.json({ ok: true });
+  });
+
   app.delete('/api/workflows/nodes/:id', (req, res) => {
     workflows.deleteNode(parseInt(req.params.id));
     res.json({ ok: true });

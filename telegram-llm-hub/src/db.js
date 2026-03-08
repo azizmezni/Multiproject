@@ -150,4 +150,11 @@ db.exec(`
   );
 `);
 
+// Migrations
+try {
+  db.prepare("SELECT custom_script FROM workflow_nodes LIMIT 0").get();
+} catch {
+  db.exec("ALTER TABLE workflow_nodes ADD COLUMN custom_script TEXT DEFAULT NULL");
+}
+
 export default db;

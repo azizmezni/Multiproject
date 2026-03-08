@@ -505,7 +505,7 @@ async function nodeDetail(nodeId, wfId) {
   const outputs = JSON.parse(node.outputs || '[]');
 
   // Fetch script + connected inputs from API
-  let scriptData = { language: 'text', script: '', prompt: '', connectedInputs: {} };
+  let scriptData = { language: 'text', script: '', prompt: '', connectedInputs: {}, isCustom: false };
   try { scriptData = await GET(`/workflows/nodes/${nodeId}/script`); } catch {}
 
   const codeContent = scriptData.script || scriptData.prompt || '// No script';
@@ -543,12 +543,16 @@ async function nodeDetail(nodeId, wfId) {
 
       <!-- RIGHT: Code + Test -->
       <div class="node-detail-right">
-        <!-- Code/Script tab -->
+        <!-- Code/Script header with generate + save buttons -->
         <div class="nd-section-title">
           Script <span class="badge ${langBadge}" style="margin-left:6px">${langLabel}</span>
-          <span class="badge badge-green" style="margin-left:4px">${nt.label}</span>
+          ${scriptData.isCustom ? '<span class="badge badge-green" style="margin-left:4px">Custom</span>' : `<span class="badge badge-blue" style="margin-left:4px">${nt.label}</span>`}
+          <div style="margin-left:auto;display:flex;gap:6px">
+            <button class="btn btn-sm btn-generate" id="nd-gen-btn" onclick="generateNodeScript(${nodeId})">🤖 Generate</button>
+            <button class="btn btn-sm btn-primary" onclick="saveNodeScript(${nodeId})">💾 Save Script</button>
+          </div>
         </div>
-        <div class="code-block" id="nd-code-block"><pre><code>${escapeHtml(codeContent)}</code></pre></div>
+        <textarea class="textarea code-textarea" id="nd-script-editor" rows="8">${escapeHtml(codeContent)}</textarea>
 
         <!-- Test Panel -->
         <div class="nd-section-title" style="margin-top:16px">
@@ -565,6 +569,34 @@ async function nodeDetail(nodeId, wfId) {
       </div>
     </div>
   `);
+}
+
+async function generateNodeScript(nodeId) {
+  const btn = document.getElementById('nd-gen-btn');
+  const editor = document.getElementById('nd-script-editor');
+  btn.disabled = true;
+  btn.classList.add('generating');
+  btn.innerHTML = '<div class="nd-spinner" style="width:14px;height:14px;border-width:2px;display:inline-block;vertical-align:middle"></div> Generating...';
+
+  try {
+    const result = await POST(`/workflows/nodes/${nodeId}/generate`);
+    editor.value = result.script || result.prompt || '';
+    showToast('🤖', 'Script generated! Click Save Script to keep it.');
+  } catch (err) {
+    showToast('❌', `Generation failed: ${err.message}`);
+  } finally {
+    btn.disabled = false;
+    btn.classList.remove('generating');
+    btn.innerHTML = '🤖 Generate';
+  }
+}
+
+async function saveNodeScript(nodeId) {
+  const editor = document.getElementById('nd-script-editor');
+  const script = editor.value.trim();
+  await PUT(`/workflows/nodes/${nodeId}/script`, { script: script || null });
+  showToast('💾', 'Script saved!');
+  await refreshAll();
 }
 
 async function testNodeRun(nodeId) {

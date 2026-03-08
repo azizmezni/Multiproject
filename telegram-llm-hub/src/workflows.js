@@ -274,6 +274,11 @@ export const workflows = {
   async executeNode(userId, node, inputData) {
     const config = node._config || {};
 
+    // If node has a custom script, use it instead of hardcoded logic
+    if (node.custom_script) {
+      return this._executeCustomScript(userId, node, inputData, config);
+    }
+
     switch (node.node_type) {
       case 'input': {
         // Input nodes just pass through their config or user-provided data
@@ -396,11 +401,57 @@ Return ONLY "true" or "false".`;
     }
   },
 
+  // Execute a custom script saved on a node
+  async _executeCustomScript(userId, node, inputData, config) {
+    const isPromptType = ['process', 'decision'].includes(node.node_type);
+
+    if (isPromptType) {
+      // Custom script is an LLM prompt — fill in inputData placeholder and call LLM
+      const prompt = node.custom_script.replace(/\{\{inputData\}\}/g, JSON.stringify(inputData));
+      const result = await llm.chat(userId, [
+        { role: 'system', content: 'Follow the instructions precisely.' },
+        { role: 'user', content: prompt },
+      ]);
+      if (node.node_type === 'decision') {
+        const decision = result.text.trim().toLowerCase().includes('true');
+        return {
+          result: decision ? 'true' : 'false',
+          outputs: { default: inputData.default || '', yes: decision ? inputData.default : '', no: decision ? '' : inputData.default },
+        };
+      }
+      return { result: result.text, outputs: { default: result.text } };
+    }
+
+    // Custom script is JavaScript code — execute it
+    try {
+      const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
+      const fn = new AsyncFunction('inputData', 'config', 'fetch', 'llm', 'userId', node.custom_script);
+      const result = await fn(inputData, config, globalThis.fetch, llm, userId);
+      // Normalize the return value
+      if (result && typeof result === 'object' && result.outputs) return result;
+      return { result: String(result || ''), outputs: { default: String(result || '') } };
+    } catch (err) {
+      return { result: `Script error: ${err.message}`, outputs: { default: '', error: err.message } };
+    }
+  },
+
   // Generate the readable script/code representation for a node
   getNodeScript(node) {
     const config = node._config || JSON.parse(node.config || '{}');
     const inputs = node._inputs || JSON.parse(node.inputs || '[]');
     const outputs = node._outputs || JSON.parse(node.outputs || '[]');
+
+    // If there's a custom script, return it instead of the generated preview
+    if (node.custom_script) {
+      const isPromptType = ['process', 'decision'].includes(node.node_type);
+      return {
+        language: isPromptType ? 'prompt' : (node.node_type === 'cli' ? 'bash' : 'javascript'),
+        script: isPromptType ? null : node.custom_script,
+        prompt: isPromptType ? node.custom_script : null,
+        config,
+        isCustom: true,
+      };
+    }
 
     switch (node.node_type) {
       case 'input':
@@ -480,6 +531,87 @@ Return ONLY "true" or "false".`;
       default:
         return { language: 'text', script: `// Unknown node type: ${node.node_type}`, prompt: null, config };
     }
+  },
+
+  // Save a custom script to a node
+  saveScript(nodeId, script) {
+    db.prepare('UPDATE workflow_nodes SET custom_script = ? WHERE id = ?').run(script, nodeId);
+  },
+
+  // Generate a script for a node using LLM
+  async generateScript(userId, nodeId) {
+    const node = this.getNode(nodeId);
+    if (!node) throw new Error('Node not found');
+
+    const config = node._config || {};
+    const inputs = node._inputs || [];
+    const outputs = node._outputs || [];
+
+    // Gather context from connected nodes
+    const edges = this.getEdges(node.workflow_id);
+    const incoming = edges.filter(e => e.to_node_id === node.id);
+    const outgoing = edges.filter(e => e.from_node_id === node.id);
+    const connectedContext = incoming.map(e => {
+      const src = this.getNode(e.from_node_id);
+      return src ? `- From "${src.name}" (${src.node_type}): output "${e.from_output}" → input "${e.to_input}"` : '';
+    }).filter(Boolean).join('\n');
+
+    const isPromptType = ['process', 'decision'].includes(node.node_type);
+    const isCodeType = ['code', 'cli', 'api', 'file', 'input', 'output', 'merge'].includes(node.node_type);
+
+    let systemPrompt, userPrompt;
+
+    if (isPromptType) {
+      systemPrompt = 'You are a prompt engineer. Write an optimized LLM prompt for a workflow node. Return ONLY the prompt text, no explanations or markdown fences.';
+      userPrompt = `Generate an LLM prompt for this workflow node:
+
+Node: "${node.name}" (type: ${node.node_type})
+Description: ${node.description || 'No description'}
+Inputs: [${inputs.join(', ')}]
+Outputs: [${outputs.join(', ')}]
+Config: ${JSON.stringify(config)}
+${connectedContext ? `\nConnected from:\n${connectedContext}` : ''}
+
+The prompt will receive input data as a JSON string. It should instruct the LLM to process it and return the result.
+${node.node_type === 'decision' ? 'The prompt must make the LLM return ONLY "true" or "false".' : ''}`;
+    } else {
+      systemPrompt = `You are a code generator. Write a JavaScript function body for a workflow node.
+The function receives these variables:
+- inputData: object with input port values (e.g. inputData.default, inputData.somePort)
+- config: node configuration object
+
+It must return: { result: string, outputs: { portName: value, ... } }
+
+Return ONLY the JavaScript code, no markdown fences or explanations.`;
+
+      userPrompt = `Generate JavaScript code for this workflow node:
+
+Node: "${node.name}" (type: ${node.node_type})
+Description: ${node.description || 'No description'}
+Inputs: [${inputs.join(', ')}]
+Outputs: [${outputs.join(', ')}]
+Config: ${JSON.stringify(config)}
+${connectedContext ? `\nConnected from:\n${connectedContext}` : ''}
+
+${node.node_type === 'cli' ? 'Use child_process exec to run shell commands.' : ''}
+${node.node_type === 'api' ? 'Use fetch() for HTTP requests.' : ''}
+${node.node_type === 'file' ? 'Use fs/promises for file operations.' : ''}
+${node.node_type === 'merge' ? 'Combine all input values into one output.' : ''}`;
+    }
+
+    const result = await llm.chat(userId, [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userPrompt },
+    ]);
+
+    const script = result.text.replace(/^```(?:javascript|js|bash)?\n?/g, '').replace(/```$/g, '').trim();
+    this.saveScript(nodeId, script);
+
+    return {
+      script,
+      language: isPromptType ? 'prompt' : (node.node_type === 'cli' ? 'bash' : 'javascript'),
+      node_type: node.node_type,
+    };
   },
 
   // Test a single node with provided input data
