@@ -565,6 +565,52 @@ body {
   color: var(--cyan);
 }
 
+/* ========== DRAFT CARDS ========== */
+.draft-card { transition: all 0.3s; }
+.draft-card:hover { border-color: var(--cyan); }
+.draft-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 10px;
+  flex-wrap: wrap;
+}
+
+/* ========== EXPAND PLANS ========== */
+.expand-plans { display: flex; flex-direction: column; gap: 12px; }
+.expand-plan-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+  transition: all 0.3s;
+  animation: fadeSlideIn 0.4s ease-out;
+}
+.expand-plan-card:hover { border-color: var(--cyan); }
+.expand-plan-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+.expand-plan-num {
+  width: 32px;
+  height: 32px;
+  background: linear-gradient(135deg, var(--cyan), var(--purple));
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 800;
+  font-size: 14px;
+  color: #fff;
+  flex-shrink: 0;
+}
+.expand-plan-title { font-weight: 700; font-size: 15px; margin-bottom: 2px; }
+.expand-plan-desc { font-size: 13px; color: var(--text2); margin-bottom: 10px; line-height: 1.5; }
+.expand-plan-section { font-size: 12px; margin-bottom: 6px; }
+.expand-plan-section strong { color: var(--text); margin-right: 4px; }
+.expand-knowledge { margin-top: 12px; }
+
 /* ========== RESPONSIVE ========== */
 @media (max-width: 768px) {
   .sidebar { width: 56px; padding: 8px 4px; }

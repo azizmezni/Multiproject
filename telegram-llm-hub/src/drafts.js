@@ -57,18 +57,32 @@ export async function fetchLinkMeta(url) {
     });
     clearTimeout(timeout);
 
-    if (!res.ok) return { url, title: url, description: '' };
+    if (!res.ok) return { url, title: url, description: '', bodyText: '' };
 
     const html = await res.text();
     const titleMatch = html.match(/<title[^>]*>([^<]+)<\/title>/i);
     const descMatch = html.match(/<meta[^>]*name=["']description["'][^>]*content=["']([^"']+)["']/i);
 
+    // Extract readable body text (strip tags, collapse whitespace, truncate)
+    const bodyText = html
+      .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
+      .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
+      .replace(/<nav[^>]*>[\s\S]*?<\/nav>/gi, '')
+      .replace(/<footer[^>]*>[\s\S]*?<\/footer>/gi, '')
+      .replace(/<header[^>]*>[\s\S]*?<\/header>/gi, '')
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/&[a-z]+;/gi, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .substring(0, 3000);
+
     return {
       url,
       title: titleMatch?.[1]?.trim() || url,
       description: descMatch?.[1]?.trim() || '',
+      bodyText,
     };
   } catch {
-    return { url, title: url, description: '' };
+    return { url, title: url, description: '', bodyText: '' };
   }
 }

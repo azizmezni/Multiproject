@@ -679,17 +679,33 @@ Only return JSON, no markdown.`
     const draft = drafts.get(parseInt(ctx.match[1]));
     if (!draft) return;
 
-    await ctx.editMessageText('\ud83d\udca1 Expanding idea...');
+    await ctx.editMessageText('\ud83d\udca1 Analyzing and generating plans...');
+
+    const pageContent = (draft.content || '').substring(0, 2000);
 
     try {
       const result = await llm.chat(ctx.from.id, [
-        { role: 'system', content: 'You are a creative product strategist. Expand on the given idea with features, architecture, tech stack suggestions, and potential challenges.' },
-        { role: 'user', content: `Expand this idea:\nURL: ${draft.url || 'N/A'}\nTitle: ${draft.title}\nDescription: ${draft.description || draft.content || 'No description'}` }
+        { role: 'system', content: `You are an expert product strategist and software architect. Analyze the given link/resource and generate 3-5 actionable project plans.
+
+For each plan, provide:
+1. **Plan Title** — short name
+2. **What to Build** — concrete description of the project
+3. **Key Features** — bullet list of 3-5 features
+4. **Tech Stack** — suggested technologies
+5. **APIs/Skills to Extract** — what can be reused as skills, knowledge, or integrations
+6. **Difficulty** — Easy / Medium / Hard
+
+Also include a section at the end:
+**Knowledge & Skills to Extract:**
+- List APIs, libraries, patterns, or data that can be extracted from this resource and reused as skills or knowledge base entries.
+
+Format with clear markdown headers and numbered plans.` },
+        { role: 'user', content: `Analyze this resource and generate multiple project plans:\n\nURL: ${draft.url || 'N/A'}\nTitle: ${draft.title}\nDescription: ${draft.description || 'No description'}\n${pageContent ? `\nPage Content:\n${pageContent}` : ''}` }
       ]);
 
-      drafts.updateContent(draft.id, draft.title, result.text, draft.content);
+      drafts.updateContent(draft.id, draft.title, result.text, draft.content || pageContent);
       await ctx.reply(
-        `\ud83d\udca1 *Expanded: ${draft.title}*\n\n${result.text.substring(0, 3500)}`,
+        `\ud83d\udca1 *Plans for: ${draft.title}*\n\n${result.text.substring(0, 3500)}`,
         { parse_mode: 'Markdown', ...kb.draftActions(draft.id) }
       );
     } catch (err) {
@@ -1025,7 +1041,7 @@ Only return JSON, no markdown.`
       await ctx.reply('\ud83d\udce5 Link detected! Fetching info...');
 
       const meta = await fetchLinkMeta(url);
-      const draft = drafts.add(userId, url, meta.title, meta.description);
+      const draft = drafts.add(userId, url, meta.title, meta.description, meta.bodyText || '');
 
       return ctx.reply(
         `\ud83d\udce5 *Saved to Drafts*\n\n` +

@@ -317,6 +317,94 @@ export function createDashboard(port = 9999) {
     res.json({ ok: true });
   });
 
+  app.post('/api/drafts/:id/expand', async (req, res) => {
+    const userId = getUserId(req);
+    llm.initDefaults(userId);
+    const draft = drafts.get(parseInt(req.params.id));
+    if (!draft) return res.status(404).json({ error: 'Not found' });
+
+    const pageContent = (draft.content || '').substring(0, 2000);
+
+    try {
+      const result = await llm.chat(userId, [
+        { role: 'system', content: `You are an expert product strategist and software architect. Analyze the given link/resource and generate 3-5 actionable project plans.
+
+For each plan, provide:
+1. **Plan Title** — short name
+2. **What to Build** — concrete description of the project
+3. **Key Features** — bullet list of 3-5 features
+4. **Tech Stack** — suggested technologies
+5. **APIs/Skills to Extract** — what can be reused as skills, knowledge, or integrations
+6. **Difficulty** — Easy / Medium / Hard
+
+Also include a section at the end:
+**Knowledge & Skills to Extract:**
+- List APIs, libraries, patterns, or data that can be extracted from this resource and reused as skills or knowledge base entries.
+
+Return the plans as valid JSON array:
+[{"title":"...","description":"...","features":["..."],"techStack":["..."],"skills":["..."],"difficulty":"Easy|Medium|Hard"}]
+
+After the JSON array, add a markdown section starting with "---\\n**Knowledge & Skills to Extract:**" listing extractable items.` },
+        { role: 'user', content: `Analyze this resource and generate project plans:\n\nURL: ${draft.url || 'N/A'}\nTitle: ${draft.title}\nDescription: ${draft.description || 'No description'}\n${pageContent ? `\nPage Content:\n${pageContent}` : ''}` }
+      ]);
+
+      // Try to parse structured plans from LLM response
+      let plans = [];
+      let knowledgeSection = '';
+      const text = result.text;
+
+      // Split on knowledge section
+      const knowledgeSplit = text.split(/---\s*\n\*\*Knowledge/i);
+      const plansText = knowledgeSplit[0];
+      if (knowledgeSplit[1]) knowledgeSection = '**Knowledge' + knowledgeSplit[1];
+
+      // Try JSON parse
+      try {
+        const jsonMatch = plansText.match(/\[[\s\S]*\]/);
+        if (jsonMatch) plans = JSON.parse(jsonMatch[0]);
+      } catch {
+        // Fallback: return raw text as single plan
+        plans = [{ title: draft.title, description: text.substring(0, 2000), features: [], techStack: [], skills: [], difficulty: 'Medium' }];
+      }
+
+      drafts.updateContent(draft.id, draft.title, text, draft.content || pageContent);
+      res.json({ plans, knowledge: knowledgeSection, raw: text, provider: result.provider, model: result.model });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/drafts/:id/clone', async (req, res) => {
+    const userId = getUserId(req);
+    llm.initDefaults(userId);
+    const draft = drafts.get(parseInt(req.params.id));
+    if (!draft) return res.status(404).json({ error: 'Not found' });
+
+    // Use specific plan from request body, or the draft itself
+    const planDesc = req.body.planTitle || draft.title;
+    const planContext = req.body.planDescription || draft.description || draft.content || '';
+
+    try {
+      const result = await llm.chat(userId, [
+        { role: 'system', content: 'You are a project planner. Return a JSON array of tasks: [{"title":"...","description":"...","requires_input":false,"input_question":null,"tools_needed":[]}]. Only JSON.' },
+        { role: 'user', content: `Create a project plan for: ${planDesc}\n\nContext: ${planContext.substring(0, 1500)}` },
+      ]);
+
+      let taskList;
+      try {
+        taskList = JSON.parse(result.text.replace(/```json?\n?/g, '').replace(/```/g, '').trim());
+      } catch { taskList = [{ title: 'Review requirements', description: result.text }]; }
+
+      const board = boards.create(userId, planDesc);
+      boards.addTasksFromPlan(board.id, taskList);
+      drafts.updateStatus(draft.id, 'processed');
+      gamification.addXP(userId, 'board_created');
+      res.json({ board, tasks: boards.getTasks(board.id) });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   // ==================== SESSIONS ====================
   app.get('/api/sessions', (req, res) => {
     res.json(sessions.listByUser(getUserId(req)));

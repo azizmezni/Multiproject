@@ -651,14 +651,94 @@ async function renderDrafts(el) {
   el.innerHTML = `
     <div class="section-title"><span class="icon">📥</span> Draft Board</div>
     ${state.drafts.length === 0 ? '<div class="empty-state"><div class="empty-icon">📥</div><h3>No drafts</h3><p>Share links in Telegram to save them here</p></div>' :
-      `<div class="grid grid-3">${state.drafts.map(d => `
-        <div class="card">
-          <div class="card-title" style="font-size:14px">${d.title || d.url || 'Untitled'}</div>
-          <div class="card-subtitle" style="margin:4px 0">${d.description ? d.description.substring(0, 100) : ''}</div>
-          ${d.url ? `<a href="${d.url}" target="_blank" style="font-size:11px;color:var(--cyan)">🔗 ${d.url.substring(0, 50)}</a>` : ''}
-          <div style="margin-top:8px"><button class="btn btn-sm btn-danger" onclick="deleteDraft(${d.id})">🗑️</button></div>
-        </div>`).join('')}</div>`}`;
+      `<div class="grid grid-2">${state.drafts.map(d => {
+        const statusBadge = d.status === 'processed' ? '<span class="badge badge-green">Processed</span>' : '<span class="badge badge-blue">New</span>';
+        return `<div class="card draft-card">
+          <div class="card-header">
+            <div class="card-title" style="font-size:14px">${escapeHtml(d.title || d.url || 'Untitled')}</div>
+            ${statusBadge}
+          </div>
+          <div class="card-subtitle" style="margin:4px 0">${d.description ? escapeHtml(d.description.substring(0, 120)) : '<span style="color:var(--text2)">No description</span>'}</div>
+          ${d.url ? `<a href="${d.url}" target="_blank" style="font-size:11px;color:var(--cyan);display:block;margin:6px 0" onclick="event.stopPropagation()">🔗 ${escapeHtml(d.url.substring(0, 60))}</a>` : ''}
+          <div class="draft-actions">
+            <button class="btn btn-sm btn-generate" onclick="expandDraft(${d.id})">💡 Expand Idea</button>
+            <button class="btn btn-sm btn-primary" onclick="cloneDraft(${d.id})">📋 Clone as Board</button>
+            <button class="btn btn-sm btn-danger" onclick="deleteDraft(${d.id})">🗑️</button>
+          </div>
+        </div>`;
+      }).join('')}</div>`}`;
 }
+
+async function expandDraft(draftId) {
+  showWideModal('💡 Expanding Idea...', '<div class="nd-test-running"><div class="nd-spinner"></div> Analyzing link and generating plans...</div>');
+
+  try {
+    const result = await POST(`/drafts/${draftId}/expand`);
+    const plans = result.plans || [];
+    const knowledge = result.knowledge || '';
+
+    let plansHtml = '';
+    if (plans.length > 0) {
+      plansHtml = plans.map((p, i) => {
+        const diffColor = p.difficulty === 'Easy' ? 'badge-green' : p.difficulty === 'Hard' ? 'badge-red' : 'badge-orange';
+        return `<div class="expand-plan-card">
+          <div class="expand-plan-header">
+            <span class="expand-plan-num">${i + 1}</span>
+            <div>
+              <div class="expand-plan-title">${escapeHtml(p.title)}</div>
+              <span class="badge ${diffColor}">${escapeHtml(p.difficulty || 'Medium')}</span>
+            </div>
+            <button class="btn btn-sm btn-primary" style="margin-left:auto" onclick="cloneDraft(${draftId}, '${escapeAttr(p.title)}', '${escapeAttr((p.description || '').substring(0, 500))}')">📋 Build This</button>
+          </div>
+          <p class="expand-plan-desc">${escapeHtml(p.description || '')}</p>
+          ${(p.features || []).length > 0 ? `<div class="expand-plan-section"><strong>Features:</strong> ${p.features.map(f => `<span class="badge badge-blue" style="margin:2px">${escapeHtml(f)}</span>`).join('')}</div>` : ''}
+          ${(p.techStack || []).length > 0 ? `<div class="expand-plan-section"><strong>Tech:</strong> ${p.techStack.map(t => `<span class="badge badge-purple" style="margin:2px">${escapeHtml(t)}</span>`).join('')}</div>` : ''}
+          ${(p.skills || []).length > 0 ? `<div class="expand-plan-section"><strong>Skills/APIs:</strong> ${p.skills.map(s => `<span class="badge badge-green" style="margin:2px">${escapeHtml(s)}</span>`).join('')}</div>` : ''}
+        </div>`;
+      }).join('');
+    } else {
+      // Fallback: show raw text
+      plansHtml = `<div class="code-block"><pre>${escapeHtml(result.raw || 'No plans generated')}</pre></div>`;
+    }
+
+    const knowledgeHtml = knowledge ? `<div class="expand-knowledge"><div class="nd-section-title" style="margin-top:16px">📚 Knowledge & Skills to Extract</div><div class="code-block"><pre>${escapeHtml(knowledge)}</pre></div></div>` : '';
+
+    showWideModal('💡 Expansion Plans', `
+      <p style="color:var(--text2);margin-bottom:16px;font-size:13px">Generated via ${escapeHtml(result.provider || 'LLM')} · ${escapeHtml(result.model || '')}</p>
+      <div class="expand-plans">${plansHtml}</div>
+      ${knowledgeHtml}
+      <div style="margin-top:16px"><button class="btn" onclick="closeModal()">Close</button></div>
+    `);
+
+    await refreshAll();
+  } catch (err) {
+    showModal('❌ Error', `<p style="color:var(--red)">${escapeHtml(err.message)}</p><button class="btn" onclick="closeModal()">Close</button>`);
+  }
+}
+
+async function cloneDraft(draftId, planTitle, planDescription) {
+  closeModal();
+  const content = document.getElementById('content');
+  content.innerHTML = '<div class="empty-state"><div class="empty-icon">⏳</div><h3>Creating board from plan...</h3></div>';
+
+  try {
+    const body = {};
+    if (planTitle) body.planTitle = planTitle;
+    if (planDescription) body.planDescription = planDescription;
+    const result = await POST(`/drafts/${draftId}/clone`, body);
+    await refreshAll();
+    if (result.board) {
+      showToast('📋', 'Board created from draft!');
+      viewBoard(result.board.id);
+    } else {
+      renderDrafts(content);
+    }
+  } catch (err) {
+    showToast('❌', `Clone failed: ${err.message}`);
+    renderDrafts(content);
+  }
+}
+
 async function deleteDraft(id) { await DEL(`/drafts/${id}`); renderDrafts(document.getElementById('content')); }
 
 // ===================== CHAT =====================
