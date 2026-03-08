@@ -1,0 +1,20 @@
+{
+  "name": "telegram-llm-hub",
+  "version": "1.0.0",
+  "description": "Telegram bot for multi-LLM chat with project boards, QA testing, and draft management",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js"
+  },
+  "dependencies": {
+    "telegraf": "^4.16.3",
+    "better-sqlite3": "^11.7.0",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

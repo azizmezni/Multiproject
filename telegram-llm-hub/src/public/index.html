@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LLM Hub Dashboard</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div id="particles"></div>
+
+<!-- Level Up Overlay -->
+<div id="levelup-overlay" class="hidden">
+  <div class="levelup-content">
+    <div class="levelup-icon">🎉</div>
+    <h2>LEVEL UP!</h2>
+    <p id="levelup-text"></p>
+    <button onclick="closeLevelUp()">Continue</button>
+  </div>
+</div>
+
+<!-- Achievement Toast -->
+<div id="toast-container"></div>
+
+<div class="app">
+  <!-- Header -->
+  <header class="header">
+    <div class="logo">
+      <span class="logo-icon">⚡</span>
+      <span class="logo-text">LLM Hub</span>
+    </div>
+    <div class="stats-bar">
+      <div class="stat-item" id="xp-display">
+        <span class="stat-label">XP</span>
+        <div class="xp-bar"><div class="xp-fill" id="xp-fill"></div></div>
+        <span class="stat-value" id="xp-value">0</span>
+      </div>
+      <div class="stat-item level-badge" id="level-badge">
+        <span class="stat-label">LVL</span>
+        <span class="stat-value" id="level-value">1</span>
+        <span class="stat-sublabel" id="level-title">Novice</span>
+      </div>
+      <div class="stat-item">
+        <span class="stat-label">🔥</span>
+        <span class="stat-value" id="streak-value">0</span>
+      </div>
+      <div class="stat-item">
+        <span class="stat-label">✅</span>
+        <span class="stat-value" id="tasks-done">0</span>
+      </div>
+    </div>
+  </header>
+
+  <div class="main-layout">
+    <!-- Sidebar -->
+    <nav class="sidebar">
+      <button class="nav-btn active" data-section="home" onclick="showSection('home')">
+        <span class="nav-icon">🏠</span><span class="nav-label">Home</span>
+      </button>
+      <button class="nav-btn" data-section="providers" onclick="showSection('providers')">
+        <span class="nav-icon">🔧</span><span class="nav-label">Providers</span>
+      </button>
+      <button class="nav-btn" data-section="boards" onclick="showSection('boards')">
+        <span class="nav-icon">📋</span><span class="nav-label">Boards</span>
+      </button>
+      <button class="nav-btn" data-section="workflows" onclick="showSection('workflows')">
+        <span class="nav-icon">🔀</span><span class="nav-label">Workflows</span>
+      </button>
+      <button class="nav-btn" data-section="drafts" onclick="showSection('drafts')">
+        <span class="nav-icon">📥</span><span class="nav-label">Drafts</span>
+      </button>
+      <button class="nav-btn" data-section="chat" onclick="showSection('chat')">
+        <span class="nav-icon">💬</span><span class="nav-label">Chat</span>
+      </button>
+      <button class="nav-btn" data-section="achievements" onclick="showSection('achievements')">
+        <span class="nav-icon">🏆</span><span class="nav-label">Achievements</span>
+      </button>
+    </nav>
+
+    <!-- Content Area -->
+    <main class="content" id="content">
+      <!-- Sections loaded dynamically -->
+    </main>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
