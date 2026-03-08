@@ -10,30 +10,31 @@ import { kb } from './keyboards.js';
 import { PROVIDER_REGISTRY } from './providers.js';
 import { workflows, NODE_TYPES } from './workflows.js';
 
-// Sanitize text for Telegram Markdown: escape unmatched special chars
-function sanitizeMd(text) {
-  // Replace problematic markdown that Telegram can't parse
-  // Keep bold (*text*) but escape lone asterisks/underscores
-  let s = text;
-  // Fix unmatched code blocks
-  const tripleCount = (s.match(/```/g) || []).length;
-  if (tripleCount % 2 !== 0) s += '\n```';
-  const singleCount = (s.match(/(?<!`)`(?!`)/g) || []).length;
-  if (singleCount % 2 !== 0) s = s.replace(/`([^`]*)$/, '`$1`');
-  return s;
+// Strip all Telegram Markdown special chars so it never fails
+function stripMd(text) {
+  return text
+    .replace(/```[\s\S]*?```/g, m => m.slice(3, -3))  // unwrap code blocks
+    .replace(/\*\*/g, '')     // remove bold **
+    .replace(/\*/g, '')       // remove italic *
+    .replace(/__/g, '')       // remove bold __
+    .replace(/_/g, '')        // remove italic _
+    .replace(/`/g, '')        // remove inline code
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');  // [text](url) -> text
 }
 
-// Send a message safely — tries Markdown, falls back to plain text
+// Send a message safely — tries Markdown first, falls back to plain text
 async function safeSend(ctx, text, extra = {}) {
+  // First try with Markdown
   try {
-    return await ctx.reply(sanitizeMd(text), { parse_mode: 'Markdown', ...extra });
-  } catch (err) {
-    if (err.message && err.message.includes("can't parse entities")) {
-      // Strip all markdown and send as plain text
-      const plain = text.replace(/\*\*/g, '').replace(/\*/g, '').replace(/_/g, '').replace(/`/g, '');
-      return await ctx.reply(plain, extra);
+    return await ctx.reply(text, { parse_mode: 'Markdown', ...extra });
+  } catch {
+    // Markdown failed — send as plain text (strip all formatting)
+    try {
+      return await ctx.reply(stripMd(text), extra);
+    } catch {
+      // Even plain text failed (maybe too long) — truncate hard
+      return await ctx.reply(stripMd(text).substring(0, 4000), extra);
     }
-    throw err;
   }
 }
 
@@ -715,46 +716,51 @@ Only return JSON, no markdown.`
         { role: 'system', content: `You are an expert product strategist and software architect. Analyze the given link/resource and generate 3-5 actionable project plans.
 
 For each plan, provide:
-1. **Plan Title** — short name
-2. **What to Build** — concrete description of the project
-3. **Key Features** — bullet list of 3-5 features
-4. **Tech Stack** — suggested technologies
-5. **APIs/Skills to Extract** — what can be reused as skills, knowledge, or integrations
-6. **Difficulty** — Easy / Medium / Hard
+1. Plan Title - short name
+2. What to Build - concrete description
+3. Key Features - bullet list of 3-5 features
+4. Tech Stack - suggested technologies
+5. APIs/Skills to Extract - what can be reused as skills, knowledge, or integrations
+6. Difficulty - Easy / Medium / Hard
 
-Also include a section at the end:
-**Knowledge & Skills to Extract:**
-- List APIs, libraries, patterns, or data that can be extracted from this resource and reused as skills or knowledge base entries.
+At the end include:
+Knowledge & Skills to Extract:
+- List APIs, libraries, patterns, or data that can be extracted and reused.
 
-Format with clear markdown headers and numbered plans.` },
+IMPORTANT: Do NOT use any markdown formatting (no *, **, _, \`, #, etc). Use plain text with dashes (-) for bullets and numbers (1. 2. 3.) for lists. Use UPPERCASE or dashes for emphasis instead.` },
         { role: 'user', content: `Analyze this resource and generate multiple project plans:\n\nURL: ${draft.url || 'N/A'}\nTitle: ${draft.title}\nDescription: ${draft.description || 'No description'}\n${pageContent ? `\nPage Content:\n${pageContent}` : ''}` }
       ]);
 
       drafts.updateContent(draft.id, draft.title, result.text, draft.content || pageContent);
 
-      // Split long responses into chunks to avoid Telegram 4096 char limit
-      const fullText = result.text;
-      const header = `\ud83d\udca1 *Plans for: ${draft.title}*\n\n`;
+      // Strip any markdown the LLM might have added anyway
+      const cleanText = stripMd(result.text);
+      const header = `Plans for: ${draft.title}\n\n`;
       const maxLen = 3800;
+      const fullMsg = header + cleanText;
 
-      if ((header + fullText).length <= maxLen) {
-        await safeSend(ctx, header + fullText, kb.draftActions(draft.id));
+      if (fullMsg.length <= maxLen) {
+        await ctx.reply(fullMsg, kb.draftActions(draft.id));
       } else {
-        // Send in chunks
+        // Send in chunks — no Markdown at all
         const chunks = [];
-        let remaining = fullText;
+        let remaining = cleanText;
         while (remaining.length > 0) {
-          chunks.push(remaining.substring(0, maxLen));
-          remaining = remaining.substring(maxLen);
+          // Try to split at a newline near the limit
+          let splitAt = maxLen;
+          const nlPos = remaining.lastIndexOf('\n', maxLen);
+          if (nlPos > maxLen * 0.5) splitAt = nlPos + 1;
+          chunks.push(remaining.substring(0, splitAt));
+          remaining = remaining.substring(splitAt);
         }
         for (let i = 0; i < chunks.length; i++) {
           const prefix = i === 0 ? header : '';
           const extra = i === chunks.length - 1 ? kb.draftActions(draft.id) : {};
-          await safeSend(ctx, prefix + chunks[i], extra);
+          await ctx.reply(prefix + chunks[i], extra);
         }
       }
     } catch (err) {
-      await ctx.reply(`\u274c Error: ${err.message}`);
+      await ctx.reply(`Error: ${err.message}`);
     }
   });
 
