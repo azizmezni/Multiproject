@@ -217,6 +217,39 @@ export function createDashboard(port = 9999) {
     res.json(workflows.getNode(nodeId));
   });
 
+  // Get node script/code representation
+  app.get('/api/workflows/nodes/:id/script', (req, res) => {
+    const node = workflows.getNode(parseInt(req.params.id));
+    if (!node) return res.status(404).json({ error: 'Not found' });
+    const script = workflows.getNodeScript(node);
+    // Also gather real input from connected nodes
+    const edges = workflows.getEdges(node.workflow_id);
+    const incoming = edges.filter(e => e.to_node_id === node.id);
+    const connectedInputs = {};
+    for (const e of incoming) {
+      const srcNode = workflows.getNode(e.from_node_id);
+      if (srcNode?.result) {
+        try {
+          const parsed = JSON.parse(srcNode.result);
+          connectedInputs[e.to_input] = parsed.outputs?.[e.from_output] || parsed.result || '';
+        } catch { connectedInputs[e.to_input] = ''; }
+      }
+    }
+    res.json({ ...script, connectedInputs, node: { id: node.id, name: node.name, node_type: node.node_type, description: node.description } });
+  });
+
+  // Test a single node with custom input
+  app.post('/api/workflows/nodes/:id/test', async (req, res) => {
+    const userId = getUserId(req);
+    llm.initDefaults(userId);
+    try {
+      const result = await workflows.testNode(userId, parseInt(req.params.id), req.body.input || {});
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ ok: false, error: err.message });
+    }
+  });
+
   app.delete('/api/workflows/nodes/:id', (req, res) => {
     workflows.deleteNode(parseInt(req.params.id));
     res.json({ ok: true });

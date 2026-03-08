@@ -496,7 +496,7 @@ async function addNode(wfId) {
   closeModal(); viewWorkflow(wfId);
 }
 
-function nodeDetail(nodeId, wfId) {
+async function nodeDetail(nodeId, wfId) {
   const wf = state.workflows.find(w => w.id === wfId) || {};
   const node = (wf.nodes || []).find(n => n.id === nodeId);
   if (!node) return;
@@ -504,19 +504,99 @@ function nodeDetail(nodeId, wfId) {
   const inputs = JSON.parse(node.inputs || '[]');
   const outputs = JSON.parse(node.outputs || '[]');
 
-  showModal(`${nt.emoji} ${node.name}`, `
-    <p style="color:var(--text2);margin-bottom:8px">${node.description || 'No description'}</p>
-    <div class="form-group"><label class="form-label">Inputs</label><input class="input" id="nd-inputs" value="${inputs.join(', ')}"></div>
-    <div class="form-group"><label class="form-label">Outputs</label><input class="input" id="nd-outputs" value="${outputs.join(', ')}"></div>
-    <div class="form-group"><label class="form-label">Name</label><input class="input" id="nd-name" value="${node.name}"></div>
-    <div class="form-group"><label class="form-label">Description</label><input class="input" id="nd-desc" value="${node.description || ''}"></div>
-    <div class="btn-group">
-      <button class="btn btn-primary" onclick="updateNode(${nodeId},${wfId})">Save</button>
-      <button class="btn btn-danger" onclick="deleteNode(${nodeId},${wfId})">Delete</button>
-      <button class="btn" onclick="closeModal()">Close</button>
+  // Fetch script + connected inputs from API
+  let scriptData = { language: 'text', script: '', prompt: '', connectedInputs: {} };
+  try { scriptData = await GET(`/workflows/nodes/${nodeId}/script`); } catch {}
+
+  const codeContent = scriptData.script || scriptData.prompt || '// No script';
+  const langLabel = scriptData.language === 'prompt' ? 'LLM Prompt' : scriptData.language === 'bash' ? 'Bash' : 'JavaScript';
+  const langBadge = scriptData.language === 'prompt' ? 'badge-purple' : scriptData.language === 'bash' ? 'badge-orange' : 'badge-blue';
+
+  // Build test input JSON from connected inputs
+  const testInputDefault = Object.keys(scriptData.connectedInputs).length > 0
+    ? JSON.stringify(scriptData.connectedInputs, null, 2)
+    : JSON.stringify({ default: '' }, null, 2);
+
+  // Parse last result if available
+  let lastResult = '';
+  if (node.result) {
+    try { lastResult = JSON.stringify(JSON.parse(node.result), null, 2); }
+    catch { lastResult = node.result; }
+  }
+
+  showWideModal(`${nt.emoji} ${node.name}`, `
+    <div class="node-detail-split">
+      <!-- LEFT: Node Config -->
+      <div class="node-detail-left">
+        <div class="nd-section-title">Configuration</div>
+        <p style="color:var(--text2);margin-bottom:10px;font-size:13px">${node.description || 'No description'}</p>
+        <div class="form-group"><label class="form-label">Name</label><input class="input" id="nd-name" value="${escapeAttr(node.name)}"></div>
+        <div class="form-group"><label class="form-label">Description</label><input class="input" id="nd-desc" value="${escapeAttr(node.description || '')}"></div>
+        <div class="form-group"><label class="form-label">Inputs</label><input class="input" id="nd-inputs" value="${inputs.join(', ')}"></div>
+        <div class="form-group"><label class="form-label">Outputs</label><input class="input" id="nd-outputs" value="${outputs.join(', ')}"></div>
+        <div class="btn-group" style="margin-top:12px">
+          <button class="btn btn-primary btn-sm" onclick="updateNode(${nodeId},${wfId})">💾 Save</button>
+          <button class="btn btn-danger btn-sm" onclick="deleteNode(${nodeId},${wfId})">🗑️ Delete</button>
+          <button class="btn btn-sm" onclick="closeModal()">Close</button>
+        </div>
+      </div>
+
+      <!-- RIGHT: Code + Test -->
+      <div class="node-detail-right">
+        <!-- Code/Script tab -->
+        <div class="nd-section-title">
+          Script <span class="badge ${langBadge}" style="margin-left:6px">${langLabel}</span>
+          <span class="badge badge-green" style="margin-left:4px">${nt.label}</span>
+        </div>
+        <div class="code-block" id="nd-code-block"><pre><code>${escapeHtml(codeContent)}</code></pre></div>
+
+        <!-- Test Panel -->
+        <div class="nd-section-title" style="margin-top:16px">
+          🧪 Test Node
+          <button class="btn btn-primary btn-sm" style="margin-left:auto" onclick="testNodeRun(${nodeId})">▶ Run Test</button>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Test Input (JSON)</label>
+          <textarea class="textarea code-textarea" id="nd-test-input" rows="4">${escapeHtml(testInputDefault)}</textarea>
+        </div>
+        <div id="nd-test-result" class="nd-test-result">
+          ${lastResult ? `<div class="nd-section-title" style="font-size:12px">Last Run Result</div><pre class="nd-result-pre">${escapeHtml(lastResult.substring(0, 2000))}</pre>` : '<div style="color:var(--text2);font-size:13px;text-align:center;padding:20px">Click ▶ Run Test to execute this node with the input above</div>'}
+        </div>
+      </div>
     </div>
-    ${node.result ? `<div class="form-group" style="margin-top:12px"><label class="form-label">Result</label><pre style="background:var(--bg);padding:10px;border-radius:8px;font-size:12px;max-height:200px;overflow:auto">${typeof node.result === 'string' ? node.result.substring(0, 1000) : JSON.stringify(JSON.parse(node.result || '{}'), null, 2).substring(0, 1000)}</pre></div>` : ''}
   `);
+}
+
+async function testNodeRun(nodeId) {
+  const resultEl = document.getElementById('nd-test-result');
+  const inputEl = document.getElementById('nd-test-input');
+  let testInput = {};
+  try { testInput = JSON.parse(inputEl.value); }
+  catch { resultEl.innerHTML = '<div style="color:var(--red);padding:10px">❌ Invalid JSON input</div>'; return; }
+
+  resultEl.innerHTML = '<div class="nd-test-running"><div class="nd-spinner"></div> Running test...</div>';
+
+  try {
+    const result = await POST(`/workflows/nodes/${nodeId}/test`, { input: testInput });
+    const statusIcon = result.ok ? '✅' : '❌';
+    const statusClass = result.ok ? 'badge-green' : 'badge-red';
+    const output = result.ok
+      ? (typeof result.output === 'object' ? JSON.stringify(result.output, null, 2) : String(result.output))
+      : result.error;
+
+    resultEl.innerHTML = `
+      <div class="nd-test-header">
+        <span class="badge ${statusClass}">${statusIcon} ${result.ok ? 'PASS' : 'FAIL'}</span>
+        <span style="color:var(--text2);font-size:11px">⏱ ${result.duration}ms</span>
+      </div>
+      <div class="nd-section-title" style="font-size:12px;margin-top:8px">Output</div>
+      <pre class="nd-result-pre">${escapeHtml(output.substring(0, 3000))}</pre>
+    `;
+
+    if (result.ok) showToast('✅', `Node test passed (${result.duration}ms)`);
+  } catch (err) {
+    resultEl.innerHTML = `<div style="color:var(--red);padding:10px">❌ ${escapeHtml(err.message)}</div>`;
+  }
 }
 async function updateNode(nodeId, wfId) {
   const inputs = document.getElementById('nd-inputs').value.split(',').map(s => s.trim()).filter(Boolean);
@@ -621,6 +701,15 @@ function showModal(title, bodyHtml) {
   backdrop.innerHTML = `<div class="modal"><h3>${title}</h3>${bodyHtml}</div>`;
   document.body.appendChild(backdrop);
 }
+function showWideModal(title, bodyHtml) {
+  const existing = document.querySelector('.modal-backdrop');
+  if (existing) existing.remove();
+  const backdrop = document.createElement('div');
+  backdrop.className = 'modal-backdrop';
+  backdrop.onclick = (e) => { if (e.target === backdrop) closeModal(); };
+  backdrop.innerHTML = `<div class="modal modal-wide"><h3>${title}</h3>${bodyHtml}</div>`;
+  document.body.appendChild(backdrop);
+}
 function closeModal() { document.querySelector('.modal-backdrop')?.remove(); }
 
 // ===================== PARTICLES =====================
@@ -656,4 +745,8 @@ function escapeHtml(text) {
   const div = document.createElement('div');
   div.textContent = text;
   return div.innerHTML;
+}
+
+function escapeAttr(text) {
+  return String(text).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/'/g, '&#39;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }

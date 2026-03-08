@@ -396,6 +396,120 @@ Return ONLY "true" or "false".`;
     }
   },
 
+  // Generate the readable script/code representation for a node
+  getNodeScript(node) {
+    const config = node._config || JSON.parse(node.config || '{}');
+    const inputs = node._inputs || JSON.parse(node.inputs || '[]');
+    const outputs = node._outputs || JSON.parse(node.outputs || '[]');
+
+    switch (node.node_type) {
+      case 'input':
+        return {
+          language: 'javascript',
+          script: `// INPUT NODE: ${node.name}\n// Passes configured value or incoming data through\n\nconst value = config.value || inputData.default || "";\n\nreturn {\n  result: value,\n  outputs: { default: value }\n};`,
+          prompt: null,
+          config,
+        };
+
+      case 'process':
+        return {
+          language: 'prompt',
+          script: null,
+          prompt: `[SYSTEM] You are a workflow processor. Return only the processed result.\n\n[USER] You are processing data in a workflow node.\nNode: ${node.name}\nDescription: ${node.description || 'Process the input'}\nInput data: {{inputData}}\n\nProcess the input and return the result.`,
+          config,
+        };
+
+      case 'code':
+        return {
+          language: 'prompt',
+          script: null,
+          prompt: `[SYSTEM] You are a code generator. Return only the code with a filename comment.\n\n[USER] Generate code based on:\nNode: ${node.name}\nDescription: ${node.description || 'Generate code'}\nInput context: {{inputData}}\n${config.language ? `Language: ${config.language}` : ''}\n${config.filename ? `Filename: ${config.filename}` : ''}\n\nGenerate clean, production-ready code.`,
+          config,
+        };
+
+      case 'cli':
+        return {
+          language: 'bash',
+          script: `# CLI NODE: ${node.name}\n# Command to execute:\n\n${config.command || '{{inputData.default}}'}`,
+          prompt: null,
+          config,
+        };
+
+      case 'decision':
+        return {
+          language: 'prompt',
+          script: null,
+          prompt: `[SYSTEM] Return only "true" or "false".\n\n[USER] Evaluate this condition:\nCondition: ${node.description || config.condition || 'Check input'}\nInput: {{inputData}}\n\nReturn ONLY "true" or "false".`,
+          config,
+        };
+
+      case 'merge':
+        return {
+          language: 'javascript',
+          script: `// MERGE NODE: ${node.name}\n// Combines all input values\n\nconst merged = Object.values(inputData).join("\\n\\n---\\n\\n");\n\nreturn {\n  result: merged,\n  outputs: { default: merged }\n};`,
+          prompt: null,
+          config,
+        };
+
+      case 'output':
+        return {
+          language: 'javascript',
+          script: `// OUTPUT NODE: ${node.name}\n// Passes input through as final result\n\nreturn {\n  result: inputData.default || "",\n  outputs: { default: inputData.default || "" }\n};`,
+          prompt: null,
+          config,
+        };
+
+      case 'api':
+        return {
+          language: 'javascript',
+          script: `// API NODE: ${node.name}\n// HTTP request\n\nconst url = ${JSON.stringify(config.url || '')} || inputData.url || "";\nconst method = ${JSON.stringify(config.method || 'GET')};\n\nconst res = await fetch(url, {\n  method,\n  headers: ${JSON.stringify(config.headers ? JSON.parse(config.headers) : {}, null, 2)},\n  ${config.method !== 'GET' ? `body: ${JSON.stringify(config.body || '')} || inputData.default` : '// GET request - no body'}\n});\n\nconst text = await res.text();\nreturn { result: text, outputs: { default: text, status: res.status } };`,
+          prompt: null,
+          config,
+        };
+
+      case 'file':
+        return {
+          language: 'javascript',
+          script: config.operation === 'write'
+            ? `// FILE WRITE NODE: ${node.name}\n\nconst path = ${JSON.stringify(config.path || 'output.txt')};\nconst content = inputData.default || ${JSON.stringify(config.content || '')};\n\nawait fs.writeFile(path, content);\nreturn { result: "Written to " + path, outputs: { default: path } };`
+            : `// FILE READ NODE: ${node.name}\n\nconst path = ${JSON.stringify(config.path || '')} || inputData.default || "";\nconst content = await fs.readFile(path, "utf-8");\n\nreturn { result: content, outputs: { default: content } };`,
+          prompt: null,
+          config,
+        };
+
+      default:
+        return { language: 'text', script: `// Unknown node type: ${node.node_type}`, prompt: null, config };
+    }
+  },
+
+  // Test a single node with provided input data
+  async testNode(userId, nodeId, testInput = {}) {
+    const node = this.getNode(nodeId);
+    if (!node) throw new Error('Node not found');
+
+    const startTime = Date.now();
+    try {
+      const result = await this.executeNode(userId, node, testInput);
+      const duration = Date.now() - startTime;
+      return {
+        ok: true,
+        duration,
+        input: testInput,
+        output: result,
+        node: { id: node.id, name: node.name, node_type: node.node_type },
+      };
+    } catch (err) {
+      const duration = Date.now() - startTime;
+      return {
+        ok: false,
+        duration,
+        input: testInput,
+        error: err.message,
+        node: { id: node.id, name: node.name, node_type: node.node_type },
+      };
+    }
+  },
+
   // Auto-generate workflow from description using LLM
   async generateWorkflow(userId, description) {
     const result = await llm.chat(userId, [
