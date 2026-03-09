@@ -24,6 +24,7 @@ export const kb = {
       [Markup.button.callback('\ud83d\udcac New Chat', 'new_chat')],
       [Markup.button.callback('\ud83d\udccb My Boards', 'list_boards'), Markup.button.callback('\ud83d\udce5 Drafts', 'list_drafts')],
       [Markup.button.callback('\ud83d\udd27 Workflows', 'list_workflows'), Markup.button.callback('\ud83d\udd27 Providers', 'providers')],
+      [Markup.button.callback('🚀 Add Feature', 'dev_feature'), Markup.button.callback('🐛 Fix Bug', 'dev_bugfix')],
       [Markup.button.callback('\u2699\ufe0f Settings', 'settings'), Markup.button.callback('\u2753 Help', 'help')],
     ]);
   },
