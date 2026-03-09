@@ -113,16 +113,55 @@ export const kb = {
     return Markup.inlineKeyboard(buttons);
   },
 
-  // Draft actions
-  draftActions(draftId) {
-    return Markup.inlineKeyboard([
-      [Markup.button.callback('\ud83d\udccb Clone as Board', `draft_clone:${draftId}`)],
-      [Markup.button.callback('\ud83d\udcdd Plan from this', `draft_plan:${draftId}`)],
-      [Markup.button.callback('\ud83d\udca1 Expand Idea', `draft_expand:${draftId}`)],
-      [Markup.button.callback('\ud83d\udcbb Run CLI Command', `draft_cli:${draftId}`)],
-      [Markup.button.callback('\ud83d\uddd1\ufe0f Delete', `draft_delete:${draftId}`)],
-      [Markup.button.callback('\u25c0\ufe0f Back', 'list_drafts')],
+  // Smart draft actions based on link type
+  draftActions(draftId, linkType = 'website') {
+    const buttons = [];
+
+    // Smart actions based on link type
+    if (['github_repo', 'github', 'github_code'].includes(linkType)) {
+      buttons.push([Markup.button.callback('📥 Clone & Setup', `smart_clone:${draftId}`)]);
+      buttons.push([Markup.button.callback('🔍 Analyze Repo', `smart_analyze:${draftId}`)]);
+    }
+    if (linkType === 'youtube' || linkType === 'youtube_playlist') {
+      buttons.push([Markup.button.callback('📺 Summarize Video', `smart_summarize:${draftId}`)]);
+      buttons.push([Markup.button.callback('📋 Extract Tutorial Steps', `smart_tutorial:${draftId}`)]);
+    }
+    if (linkType === 'npm' || linkType === 'pypi') {
+      buttons.push([Markup.button.callback('📦 Install Package', `smart_install:${draftId}`)]);
+      buttons.push([Markup.button.callback('🔍 Analyze Package', `smart_analyze:${draftId}`)]);
+    }
+    if (['article', 'docs', 'stackoverflow'].includes(linkType)) {
+      buttons.push([Markup.button.callback('📖 Summarize & Extract', `smart_summarize:${draftId}`)]);
+      buttons.push([Markup.button.callback('📋 Follow Tutorial', `smart_tutorial:${draftId}`)]);
+    }
+    if (linkType === 'api') {
+      buttons.push([Markup.button.callback('🌐 Test API', `smart_testapi:${draftId}`)]);
+      buttons.push([Markup.button.callback('📦 Generate Client', `smart_analyze:${draftId}`)]);
+    }
+    if (linkType === 'docker') {
+      buttons.push([Markup.button.callback('🐳 Pull & Run', `smart_install:${draftId}`)]);
+    }
+    if (linkType === 'github_issue') {
+      buttons.push([Markup.button.callback('🐛 Analyze Issue', `smart_analyze:${draftId}`)]);
+    }
+
+    // Universal smart action (always first if no type-specific ones)
+    if (buttons.length === 0) {
+      buttons.push([Markup.button.callback('🧠 Smart Analyze', `smart_analyze:${draftId}`)]);
+    }
+
+    // Common actions
+    buttons.push([
+      Markup.button.callback('\ud83d\udca1 Expand Idea', `draft_expand:${draftId}`),
+      Markup.button.callback('\ud83d\udccb Clone as Board', `draft_clone:${draftId}`),
     ]);
+    buttons.push([
+      Markup.button.callback('\ud83d\udcbb Run CLI', `draft_cli:${draftId}`),
+      Markup.button.callback('\ud83d\uddd1\ufe0f Delete', `draft_delete:${draftId}`),
+    ]);
+    buttons.push([Markup.button.callback('\u25c0\ufe0f Back', 'list_drafts')]);
+
+    return Markup.inlineKeyboard(buttons);
   },
 
   // Session list

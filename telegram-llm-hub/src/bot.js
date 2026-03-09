@@ -3,7 +3,7 @@ import db from './db.js';
 import { llm } from './llm-manager.js';
 import { sessions, userState } from './sessions.js';
 import { boards } from './boards.js';
-import { drafts, extractUrl, fetchLinkMeta } from './drafts.js';
+import { drafts, extractUrl, fetchLinkMeta, detectLinkType } from './drafts.js';
 import { settings } from './settings.js';
 import { qa } from './qa.js';
 import { kb } from './keyboards.js';
@@ -910,6 +910,392 @@ Return ONLY the JSON array. No markdown, no extra text, no code fences.` },
     await showDraftsEdit(ctx, ctx.from.id);
   });
 
+  // --- Smart Link Actions ---
+
+  // 📥 Clone & Setup — clone a git repo and install dependencies
+  bot.action(/smart_clone:(\d+)/, async (ctx) => {
+    await ctx.answerCbQuery();
+    const draft = drafts.get(parseInt(ctx.match[1]));
+    if (!draft) return;
+
+    // Extract clone URL from the page URL
+    let cloneUrl = draft.url;
+    if (cloneUrl.includes('github.com') && !cloneUrl.endsWith('.git')) {
+      cloneUrl = cloneUrl.replace(/\/$/, '') + '.git';
+    }
+
+    // Extract repo name for folder
+    const repoName = cloneUrl.match(/\/([^/]+?)(?:\.git)?$/)?.[1] || 'repo';
+
+    await ctx.editMessageText(`📥 *Cloning:* \`${repoName}\`...`, { parse_mode: 'Markdown' });
+
+    try {
+      // Clone the repo
+      const cloneResult = await qa.runCommand(`git clone ${cloneUrl}`, process.cwd(), 60000);
+      if (!cloneResult.ok) {
+        return safeSend(ctx, `❌ Clone failed:\n\`${cloneResult.stderr.substring(0, 500)}\``);
+      }
+
+      await ctx.reply(`✅ Cloned to \`${repoName}/\``, { parse_mode: 'Markdown' });
+
+      // Detect project type and install deps
+      const fs = await import('fs/promises');
+      const path = await import('path');
+      const repoDir = path.join(process.cwd(), repoName);
+
+      let projectType = 'unknown';
+      let installCmd = null;
+      const files = await fs.readdir(repoDir).catch(() => []);
+
+      if (files.includes('package.json')) {
+        projectType = 'node';
+        installCmd = `cd "${repoDir}" && npm install`;
+      } else if (files.includes('requirements.txt')) {
+        projectType = 'python';
+        installCmd = `cd "${repoDir}" && pip install -r requirements.txt`;
+      } else if (files.includes('Cargo.toml')) {
+        projectType = 'rust';
+        installCmd = `cd "${repoDir}" && cargo build`;
+      } else if (files.includes('go.mod')) {
+        projectType = 'go';
+        installCmd = `cd "${repoDir}" && go mod download`;
+      } else if (files.includes('pom.xml')) {
+        projectType = 'java';
+        installCmd = `cd "${repoDir}" && mvn install`;
+      } else if (files.includes('Gemfile')) {
+        projectType = 'ruby';
+        installCmd = `cd "${repoDir}" && bundle install`;
+      } else if (files.includes('composer.json')) {
+        projectType = 'php';
+        installCmd = `cd "${repoDir}" && composer install`;
+      }
+
+      // Read README if exists
+      let readmeContent = '';
+      for (const f of ['README.md', 'readme.md', 'README.txt', 'README']) {
+        try {
+          readmeContent = await fs.readFile(path.join(repoDir, f), 'utf-8');
+          break;
+        } catch {}
+      }
+
+      if (installCmd) {
+        await ctx.reply(`📦 Detected *${projectType}* project. Installing dependencies...`, { parse_mode: 'Markdown' });
+        const installResult = await qa.runCommand(installCmd, repoDir, 120000);
+        const installEmoji = installResult.ok ? '✅' : '⚠️';
+        const output = (installResult.stdout || installResult.stderr || 'Done').substring(0, 500);
+        await ctx.reply(`${installEmoji} Install:\n\`\`\`\n${output}\n\`\`\``, { parse_mode: 'Markdown' });
+      }
+
+      // Send summary with smart analysis from LLM
+      const userId = ctx.from.id;
+      llm.initDefaults(userId);
+
+      const analysis = await llm.chat(userId, [
+        { role: 'system', content: 'You are a software analyst. Analyze the cloned repo and give a brief summary: what it does, how to run it, key files. Keep it short and actionable (under 500 chars). No markdown.' },
+        { role: 'user', content: `Repo: ${repoName}\nProject type: ${projectType}\nFiles: ${files.slice(0, 30).join(', ')}\nREADME preview:\n${readmeContent.substring(0, 1500)}` },
+      ]);
+
+      await safeSend(ctx,
+        `🏁 *${repoName}* cloned and ready!\n\n` +
+        `Type: ${projectType}\n` +
+        `${analysis.text.substring(0, 800)}\n\n` +
+        `_via ${analysis.provider}_`
+      );
+
+      drafts.updateStatus(draft.id, 'processed');
+    } catch (err) {
+      await ctx.reply(`❌ Error: ${err.message}`);
+    }
+  });
+
+  // 🔍 Smart Analyze — LLM reads the page and figures out what you need
+  bot.action(/smart_analyze:(\d+)/, async (ctx) => {
+    await ctx.answerCbQuery();
+    const draft = drafts.get(parseInt(ctx.match[1]));
+    if (!draft) return;
+
+    await ctx.editMessageText('🧠 Analyzing link...', { parse_mode: 'Markdown' });
+
+    const userId = ctx.from.id;
+    llm.initDefaults(userId);
+    const linkType = detectLinkType(draft.url);
+    const pageContent = (draft.content || '').substring(0, 3000);
+
+    try {
+      const result = await llm.chat(userId, [
+        { role: 'system', content: `You are a smart assistant analyzing a shared link. The user shared this ${linkType} link because they want to USE it, LEARN from it, or BUILD something with it.
+
+Analyze the link and provide:
+1. **What it is** — brief summary (2 sentences)
+2. **Why they probably shared it** — what they want to do with it
+3. **Actionable steps** — 3-5 concrete things they can do right now
+4. **Dependencies/requirements** — what they need to get started
+5. **Quick start commands** — actual CLI commands to get started (if applicable)
+
+Be practical and specific. Use short sentences.` },
+        { role: 'user', content: `URL: ${draft.url}\nTitle: ${draft.title}\nDescription: ${draft.description || 'N/A'}\n\nPage content:\n${pageContent}` },
+      ]);
+
+      await safeSend(ctx,
+        `🧠 *Smart Analysis*\n\n${result.text.substring(0, 3500)}\n\n_via ${result.provider}_`,
+        kb.draftActions(draft.id, linkType)
+      );
+    } catch (err) {
+      await ctx.reply(`❌ Error: ${err.message}`);
+    }
+  });
+
+  // 📺 Summarize — video/article summary with key takeaways
+  bot.action(/smart_summarize:(\d+)/, async (ctx) => {
+    await ctx.answerCbQuery();
+    const draft = drafts.get(parseInt(ctx.match[1]));
+    if (!draft) return;
+
+    const linkType = detectLinkType(draft.url);
+    const isVideo = linkType.startsWith('youtube');
+
+    await ctx.editMessageText(
+      isVideo ? '📺 Analyzing video...' : '📖 Summarizing content...'
+    );
+
+    const userId = ctx.from.id;
+    llm.initDefaults(userId);
+    const pageContent = (draft.content || '').substring(0, 3000);
+
+    try {
+      const prompt = isVideo
+        ? `This is a YouTube video page. Extract and summarize:
+1. **Video Title & Channel**
+2. **Main Topic** (1-2 sentences)
+3. **Key Points** (5-7 bullet points)
+4. **Technologies/Tools mentioned** (list them)
+5. **Dependencies to install** (if it's a tutorial, list packages/tools needed)
+6. **Step-by-step plan** (if tutorial, list the steps to follow)
+
+URL: ${draft.url}
+Title: ${draft.title}
+Page content: ${pageContent}`
+        : `Summarize this article/documentation:
+1. **Title & Author**
+2. **Summary** (2-3 sentences)
+3. **Key Takeaways** (5-7 bullet points)
+4. **Code snippets / commands** (if any, list them)
+5. **Dependencies** (tools/packages mentioned)
+6. **Action items** (what to do next)
+
+URL: ${draft.url}
+Title: ${draft.title}
+Page content: ${pageContent}`;
+
+      const result = await llm.chat(userId, [
+        { role: 'system', content: 'You are an expert content analyst. Extract actionable information. Be concise and practical.' },
+        { role: 'user', content: prompt },
+      ]);
+
+      // Store the summary in the draft
+      drafts.updateContent(draft.id, draft.title, result.text.substring(0, 2000), draft.content);
+
+      await safeSend(ctx,
+        `${isVideo ? '📺' : '📖'} *Summary*\n\n${result.text.substring(0, 3500)}\n\n_via ${result.provider}_`,
+        kb.draftActions(draft.id, linkType)
+      );
+    } catch (err) {
+      await ctx.reply(`❌ Error: ${err.message}`);
+    }
+  });
+
+  // 📋 Follow Tutorial — extract steps, create board, install deps
+  bot.action(/smart_tutorial:(\d+)/, async (ctx) => {
+    await ctx.answerCbQuery();
+    const draft = drafts.get(parseInt(ctx.match[1]));
+    if (!draft) return;
+
+    await ctx.editMessageText('📋 Extracting tutorial steps...');
+
+    const userId = ctx.from.id;
+    llm.initDefaults(userId);
+    const pageContent = (draft.content || '').substring(0, 3000);
+
+    try {
+      const result = await llm.chat(userId, [
+        { role: 'system', content: `You are a tutorial parser. Extract a step-by-step plan from this content.
+
+Return a JSON object:
+{
+  "title": "Tutorial/Project title",
+  "prerequisites": ["prerequisite1", "prerequisite2"],
+  "install_commands": ["npm install x", "pip install y"],
+  "steps": [
+    {"title": "Step title", "description": "What to do", "commands": ["cmd1", "cmd2"], "code": "code snippet if any"}
+  ],
+  "test_commands": ["npm test", "python -m pytest"]
+}
+
+Return ONLY valid JSON.` },
+        { role: 'user', content: `Extract tutorial steps from:\nURL: ${draft.url}\nTitle: ${draft.title}\n\nContent:\n${pageContent}` },
+      ]);
+
+      let tutorial;
+      try {
+        tutorial = JSON.parse(result.text.replace(/```json?\n?/g, '').replace(/```/g, '').trim());
+      } catch {
+        return safeSend(ctx, `📋 Could not parse tutorial steps. Here's the raw analysis:\n\n${result.text.substring(0, 2000)}`);
+      }
+
+      // Install prerequisites
+      if (tutorial.install_commands?.length > 0) {
+        const installButtons = [
+          [{ text: '📦 Install All Dependencies', callback_data: `smart_install_cmds:${draft.id}` }],
+          [{ text: '📋 Just Create Board', callback_data: `smart_tutorial_board:${draft.id}` }],
+          [{ text: '◀️ Back', callback_data: 'list_drafts' }],
+        ];
+
+        // Store tutorial data in draft content for later use
+        drafts.updateContent(draft.id, tutorial.title || draft.title, JSON.stringify(tutorial), draft.content);
+
+        let previewText = `📋 *${stripMd(tutorial.title || 'Tutorial')}*\n\n`;
+        if (tutorial.prerequisites?.length) {
+          previewText += `*Prerequisites:*\n${tutorial.prerequisites.map(p => `• ${stripMd(p)}`).join('\n')}\n\n`;
+        }
+        previewText += `*Steps (${tutorial.steps?.length || 0}):*\n`;
+        for (let i = 0; i < (tutorial.steps || []).length && i < 8; i++) {
+          previewText += `${i + 1}. ${stripMd(tutorial.steps[i].title)}\n`;
+        }
+        if ((tutorial.steps?.length || 0) > 8) previewText += `... and ${tutorial.steps.length - 8} more\n`;
+
+        if (tutorial.install_commands?.length) {
+          previewText += `\n*Install commands:*\n${tutorial.install_commands.map(c => `\`${c}\``).join('\n')}\n`;
+        }
+
+        return safeSend(ctx, previewText, { reply_markup: { inline_keyboard: installButtons } });
+      }
+
+      // No install commands — just create the board
+      drafts.updateContent(draft.id, tutorial.title || draft.title, JSON.stringify(tutorial), draft.content);
+      await createTutorialBoard(ctx, userId, draft, tutorial);
+
+    } catch (err) {
+      await ctx.reply(`❌ Error: ${err.message}`);
+    }
+  });
+
+  // 📦 Install Package (npm/pypi/docker)
+  bot.action(/smart_install:(\d+)/, async (ctx) => {
+    await ctx.answerCbQuery();
+    const draft = drafts.get(parseInt(ctx.match[1]));
+    if (!draft) return;
+
+    const linkType = detectLinkType(draft.url);
+
+    await ctx.editMessageText('📦 Installing...');
+
+    try {
+      let installCmd;
+      if (linkType === 'npm') {
+        const pkgName = draft.url.match(/npmjs\.com\/package\/([@\w/-]+)/)?.[1];
+        if (!pkgName) return ctx.reply('Could not extract package name.');
+        installCmd = `npm install ${pkgName}`;
+      } else if (linkType === 'pypi') {
+        const pkgName = draft.url.match(/pypi\.org\/project\/([\w-]+)/)?.[1];
+        if (!pkgName) return ctx.reply('Could not extract package name.');
+        installCmd = `pip install ${pkgName}`;
+      } else if (linkType === 'docker') {
+        const imgName = draft.url.match(/hub\.docker\.com\/r\/([\w/-]+)/)?.[1] ||
+                        draft.url.match(/hub\.docker\.com\/_\/([\w-]+)/)?.[1];
+        if (!imgName) return ctx.reply('Could not extract image name.');
+        installCmd = `docker pull ${imgName}`;
+      } else {
+        // Generic — try npm
+        installCmd = `npm install ${draft.title || 'unknown'}`;
+      }
+
+      await ctx.reply(`▶️ Running: \`${installCmd}\``, { parse_mode: 'Markdown' });
+      const result = await qa.runCommand(installCmd, process.cwd(), 120000);
+      const emoji = result.ok ? '✅' : '❌';
+      let output = result.stdout || result.stderr || 'Done';
+      if (output.length > 2000) output = output.substring(0, 2000) + '...(truncated)';
+
+      await safeSend(ctx, `${emoji} Install result:\n\`\`\`\n${output}\n\`\`\``);
+      if (result.ok) drafts.updateStatus(draft.id, 'processed');
+    } catch (err) {
+      await ctx.reply(`❌ Error: ${err.message}`);
+    }
+  });
+
+  // Install commands from tutorial extraction
+  bot.action(/smart_install_cmds:(\d+)/, async (ctx) => {
+    await ctx.answerCbQuery();
+    const draft = drafts.get(parseInt(ctx.match[1]));
+    if (!draft) return;
+
+    let tutorial;
+    try { tutorial = JSON.parse(draft.description); } catch { return ctx.reply('Tutorial data expired. Try extracting again.'); }
+
+    await ctx.editMessageText('📦 Installing dependencies...');
+
+    for (const cmd of (tutorial.install_commands || [])) {
+      await ctx.reply(`▶️ \`${cmd}\``, { parse_mode: 'Markdown' });
+      const result = await qa.runCommand(cmd, process.cwd(), 120000);
+      const emoji = result.ok ? '✅' : '❌';
+      const output = (result.stdout || result.stderr || 'Done').substring(0, 500);
+      await ctx.reply(`${emoji}\n\`\`\`\n${output}\n\`\`\``, { parse_mode: 'Markdown' });
+      if (!result.ok) break;
+    }
+
+    // After install, create the board
+    const userId = ctx.from.id;
+    await createTutorialBoard(ctx, userId, draft, tutorial);
+  });
+
+  // Create board from tutorial
+  bot.action(/smart_tutorial_board:(\d+)/, async (ctx) => {
+    await ctx.answerCbQuery();
+    const draft = drafts.get(parseInt(ctx.match[1]));
+    if (!draft) return;
+
+    let tutorial;
+    try { tutorial = JSON.parse(draft.description); } catch { return ctx.reply('Tutorial data expired.'); }
+
+    await createTutorialBoard(ctx, ctx.from.id, draft, tutorial);
+  });
+
+  // 🌐 Test API endpoint
+  bot.action(/smart_testapi:(\d+)/, async (ctx) => {
+    await ctx.answerCbQuery();
+    const draft = drafts.get(parseInt(ctx.match[1]));
+    if (!draft) return;
+
+    await ctx.editMessageText('🌐 Testing API endpoint...');
+
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 10000);
+      const res = await fetch(draft.url, {
+        signal: controller.signal,
+        headers: { 'Accept': 'application/json', 'User-Agent': 'TelegramLLMHub/1.0' },
+      });
+      clearTimeout(timeout);
+
+      const status = res.status;
+      const contentType = res.headers.get('content-type') || '';
+      let body = await res.text();
+      if (body.length > 2000) body = body.substring(0, 2000) + '...';
+
+      // Try to pretty-print JSON
+      try { body = JSON.stringify(JSON.parse(body), null, 2); } catch {}
+
+      await safeSend(ctx,
+        `🌐 *API Test Result*\n\n` +
+        `Status: ${status}\n` +
+        `Content-Type: ${contentType}\n\n` +
+        `\`\`\`\n${body.substring(0, 1500)}\n\`\`\``
+      );
+    } catch (err) {
+      await ctx.reply(`❌ API test failed: ${err.message}`);
+    }
+  });
+
   // --- Settings actions ---
   bot.action('settings', async (ctx) => {
     await ctx.answerCbQuery();
@@ -1397,20 +1783,37 @@ Return ONLY the JSON array. No markdown, no extra text, no code fences.` },
       return ctx.reply(`${emoji}\n\`\`\`\n${output}\n\`\`\``, { parse_mode: 'Markdown' });
     }
 
-    // Check if message contains a URL -> add to drafts
+    // Check if message contains a URL -> smart link handling
     const url = extractUrl(text);
     if (url && !text.startsWith('/')) {
-      await ctx.reply('\ud83d\udce5 Link detected! Fetching info...');
+      const linkType = detectLinkType(url);
+      const typeLabels = {
+        github_repo: '📦 GitHub Repo', github_issue: '🐛 GitHub Issue', github_code: '💻 GitHub Code',
+        github: '🐙 GitHub', youtube: '📺 YouTube Video', youtube_playlist: '📺 YouTube Playlist',
+        npm: '📦 npm Package', pypi: '📦 PyPI Package', docs: '📖 Documentation',
+        article: '📰 Article', stackoverflow: '💡 StackOverflow', api: '🌐 API',
+        docker: '🐳 Docker Image', website: '🔗 Website',
+      };
+      const typeLabel = typeLabels[linkType] || '🔗 Link';
+
+      await ctx.reply(`${typeLabel} detected! Fetching info...`);
 
       const meta = await fetchLinkMeta(url);
       const draft = drafts.add(userId, url, meta.title, meta.description, meta.bodyText || '');
 
-      return safeSend(ctx,
-        `\ud83d\udce5 *Saved to Drafts*\n\n` +
-        `*${meta.title}*\n${meta.description ? meta.description.substring(0, 200) : 'No description'}\n\n` +
-        `What would you like to do?`,
-        kb.draftActions(draft.id)
-      );
+      // Smart context message based on link type
+      let contextMsg = `📥 *Saved to Drafts*\n\n`;
+      contextMsg += `*${stripMd(meta.title || url)}*\n`;
+      if (meta.description) contextMsg += `${stripMd(meta.description).substring(0, 200)}\n`;
+      contextMsg += `\nType: ${typeLabel}\n`;
+
+      if (linkType === 'github_repo' && meta.extra?.language) {
+        contextMsg += `Language: ${meta.extra.language}\n`;
+      }
+
+      contextMsg += `\nI detected this as a *${typeLabel}*. Pick a smart action:`;
+
+      return safeSend(ctx, contextMsg, kb.draftActions(draft.id, linkType));
     }
 
     // Normal chat mode
@@ -1590,7 +1993,8 @@ Return ONLY the JSON array. No markdown, no extra text, no code fences.` },
     if (draft.description) text += `${draft.description.substring(0, 500)}\n\n`;
     text += `Status: ${draft.status} | Added: ${draft.created_at}`;
 
-    await ctx.editMessageText(text, { parse_mode: 'Markdown', ...kb.draftActions(draft.id) });
+    const linkType = draft.url ? detectLinkType(draft.url) : 'website';
+    await ctx.editMessageText(text, { parse_mode: 'Markdown', ...kb.draftActions(draft.id, linkType) });
   });
 
   // Board execution engine
@@ -1814,6 +2218,43 @@ IMPORTANT:
     } catch (err) {
       await ctx.reply(`❌ Error: ${err.message}`);
     }
+  }
+
+  // --- Smart link helpers ---
+  async function createTutorialBoard(ctx, userId, draft, tutorial) {
+    const title = tutorial.title || draft.title || 'Tutorial';
+    const board = boards.create(userId, title);
+
+    const taskList = (tutorial.steps || []).map((step, i) => ({
+      title: `Step ${i + 1}: ${step.title}`,
+      description: [
+        step.description || '',
+        step.commands?.length ? `Commands:\n${step.commands.join('\n')}` : '',
+        step.code ? `Code:\n${step.code.substring(0, 300)}` : '',
+      ].filter(Boolean).join('\n\n'),
+    }));
+
+    // Add test step if there are test commands
+    if (tutorial.test_commands?.length) {
+      taskList.push({
+        title: 'Run Tests',
+        description: `Test commands:\n${tutorial.test_commands.join('\n')}`,
+      });
+    }
+
+    if (taskList.length === 0) {
+      taskList.push({ title: 'Review tutorial', description: `Source: ${draft.url}` });
+    }
+
+    boards.addTasksFromPlan(board.id, taskList);
+    userState.setActiveBoard(userId, board.id);
+    drafts.updateStatus(draft.id, 'processed');
+
+    const tasks = boards.getTasks(board.id);
+    await ctx.reply(
+      `📋 *Board created: ${stripMd(title)}*\n${tasks.length} steps extracted from tutorial`,
+      { parse_mode: 'Markdown', ...kb.boardView(board.id, tasks, 'planning') }
+    );
   }
 
   // --- Workflow helpers ---
