@@ -603,9 +603,28 @@ async function nodeDetail(nodeId, wfId) {
         <div id="nd-test-result" class="nd-test-result">
           ${lastResult ? `<div class="nd-section-title" style="font-size:12px">Last Run Result</div><pre class="nd-result-pre">${escapeHtml(lastResult.substring(0, 2000))}</pre>` : '<div style="color:var(--text2);font-size:13px;text-align:center;padding:20px">Click ▶ Run Test to execute this node with the input above</div>'}
         </div>
+
+        <!-- Script Chat Assistant -->
+        <div class="nd-script-chat">
+          <div class="nd-section-title" style="cursor:pointer" onclick="toggleScriptChat()">
+            💬 Script Assistant <span class="badge badge-purple" style="margin-left:6px">AI</span>
+            <span style="margin-left:auto;font-size:11px;color:var(--text2)" id="nd-chat-toggle">▼ Open</span>
+          </div>
+          <div id="nd-script-chat-body" style="display:none">
+            <div id="nd-chat-messages" class="nd-chat-messages"></div>
+            <div class="nd-chat-input-row">
+              <input class="input" id="nd-chat-input" placeholder="Ask AI to fix, explain, or improve this script..."
+                onkeydown="if(event.key==='Enter')sendScriptChat(${nodeId})">
+              <button class="btn btn-primary btn-sm" onclick="sendScriptChat(${nodeId})">Send</button>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   `);
+  // Reset chat history when opening node detail
+  window._scriptChatHistory = [];
+  window._lastScriptFix = null;
 }
 
 async function generateNodeScript(nodeId) {
@@ -703,6 +722,82 @@ function copyUpstreamToTestInput(data) {
 
 function copyToClipboard(text) {
   navigator.clipboard.writeText(text).then(() => showToast('📋', 'Copied!')).catch(() => showToast('❌', 'Copy failed'));
+}
+
+// ===================== SCRIPT CHAT ASSISTANT =====================
+function toggleScriptChat() {
+  const body = document.getElementById('nd-script-chat-body');
+  const toggle = document.getElementById('nd-chat-toggle');
+  if (body.style.display === 'none') {
+    body.style.display = 'block';
+    toggle.textContent = '▲ Close';
+  } else {
+    body.style.display = 'none';
+    toggle.textContent = '▼ Open';
+  }
+}
+
+function formatChatReply(text) {
+  const parts = text.split(/(```[\s\S]*?```)/g);
+  return parts.map(part => {
+    if (part.startsWith('```')) {
+      const code = part.replace(/^```(?:fix|javascript|js|bash|prompt)?\n?/, '').replace(/```$/, '');
+      return `<pre class="nd-result-pre" style="margin:6px 0">${escapeHtml(code)}</pre>`;
+    }
+    return escapeHtml(part).replace(/\n/g, '<br>');
+  }).join('');
+}
+
+async function sendScriptChat(nodeId) {
+  const input = document.getElementById('nd-chat-input');
+  const msg = input.value.trim();
+  if (!msg) return;
+  input.value = '';
+
+  const container = document.getElementById('nd-chat-messages');
+  container.innerHTML += `<div class="nd-chat-msg nd-chat-user">${escapeHtml(msg)}</div>`;
+  container.innerHTML += `<div class="nd-chat-msg nd-chat-ai" id="nd-chat-typing" style="opacity:0.5"><div class="nd-spinner" style="width:14px;height:14px;border-width:2px;display:inline-block;vertical-align:middle"></div> Thinking...</div>`;
+  container.scrollTop = container.scrollHeight;
+
+  const editor = document.getElementById('nd-script-editor');
+  const currentScript = editor ? editor.value : '';
+
+  try {
+    const result = await POST(`/workflows/nodes/${nodeId}/chat`, {
+      message: msg,
+      script: currentScript,
+      history: window._scriptChatHistory || [],
+    });
+
+    document.getElementById('nd-chat-typing')?.remove();
+
+    if (!window._scriptChatHistory) window._scriptChatHistory = [];
+    window._scriptChatHistory.push({ role: 'user', content: msg });
+    window._scriptChatHistory.push({ role: 'assistant', content: result.reply });
+
+    const replyHtml = formatChatReply(result.reply);
+
+    let applyBtn = '';
+    if (result.fixedScript) {
+      window._lastScriptFix = result.fixedScript;
+      applyBtn = `<button class="btn btn-sm btn-primary" style="margin-top:6px" onclick="applyScriptFix()">✨ Apply Fix</button>`;
+    }
+
+    container.innerHTML += `<div class="nd-chat-msg nd-chat-ai">${replyHtml}<div class="msg-meta" style="font-size:10px;opacity:0.6;margin-top:4px">${escapeHtml(result.provider || '')} · ${escapeHtml(result.model || '')}</div>${applyBtn}</div>`;
+    container.scrollTop = container.scrollHeight;
+  } catch (err) {
+    document.getElementById('nd-chat-typing')?.remove();
+    container.innerHTML += `<div class="nd-chat-msg nd-chat-ai" style="color:var(--red)">Error: ${escapeHtml(err.message)}</div>`;
+  }
+}
+
+function applyScriptFix() {
+  if (!window._lastScriptFix) return;
+  const editor = document.getElementById('nd-script-editor');
+  if (editor) {
+    editor.value = window._lastScriptFix;
+    showToast('✨', 'Script fix applied! Click Save Script to keep it.');
+  }
 }
 
 async function testNodeRun(nodeId) {

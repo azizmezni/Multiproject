@@ -268,7 +268,54 @@ export const workflows = {
 
     const allDone = this.getNodes(workflowId).every(n => n.status === 'done');
     this.updateStatus(workflowId, allDone ? 'completed' : 'partial');
+
+    // Save outputs to output/<project-name>/ folder
+    await this._saveOutputs(workflow, nodeResults);
+
     return nodeResults;
+  },
+
+  // Save workflow execution results to output/<project>/ folder
+  async _saveOutputs(workflow, nodeResults) {
+    const fs = await import('fs/promises');
+    const pathMod = await import('path');
+
+    const safeName = (workflow.title || 'unnamed').replace(/[^a-zA-Z0-9_\- ]/g, '_').replace(/\s+/g, '_').substring(0, 50);
+    const outputDir = pathMod.join(process.cwd(), 'output', safeName);
+
+    try {
+      await fs.mkdir(outputDir, { recursive: true });
+
+      const summary = {
+        workflowId: workflow.id,
+        title: workflow.title,
+        executedAt: new Date().toISOString(),
+        nodeCount: nodeResults.size,
+        results: {},
+      };
+
+      for (const [nodeId, result] of nodeResults) {
+        const node = this.getNode(nodeId);
+        const nodeName = node?.name || `node_${nodeId}`;
+        summary.results[nodeName] = result;
+
+        // Save code/file/output node results as separate files
+        if (node && ['code', 'file', 'output'].includes(node.node_type) && result.result) {
+          const safeNodeName = nodeName.replace(/[^a-zA-Z0-9_\-]/g, '_');
+          const ext = node.node_type === 'code' ? (result.outputs?.filename ? '' : '.txt') : '.txt';
+          const fileName = result.outputs?.filename || `${safeNodeName}${ext}`;
+          await fs.writeFile(pathMod.join(outputDir, fileName), result.result, 'utf-8');
+        }
+      }
+
+      await fs.writeFile(
+        pathMod.join(outputDir, 'execution_summary.json'),
+        JSON.stringify(summary, null, 2),
+        'utf-8'
+      );
+    } catch (err) {
+      console.error('Failed to save outputs:', err.message);
+    }
   },
 
   async executeNode(userId, node, inputData) {
@@ -385,13 +432,20 @@ Return ONLY "true" or "false".`;
 
       case 'file': {
         const fs = await import('fs/promises');
+        const pathMod = await import('path');
         if (config.operation === 'write') {
-          const path = config.path || 'output.txt';
-          await fs.writeFile(path, inputData.default || config.content || '');
-          return { result: `Written to ${path}`, outputs: { default: path } };
+          const filePath = config.path || 'output.txt';
+          // Use output directory for the workflow
+          const workflow = this.get(node.workflow_id);
+          const safeName = (workflow?.title || 'unnamed').replace(/[^a-zA-Z0-9_\- ]/g, '_').replace(/\s+/g, '_').substring(0, 50);
+          const outputDir = pathMod.join(process.cwd(), 'output', safeName);
+          await fs.mkdir(outputDir, { recursive: true });
+          const fullPath = pathMod.join(outputDir, pathMod.basename(filePath));
+          await fs.writeFile(fullPath, inputData.default || config.content || '');
+          return { result: `Written to ${fullPath}`, outputs: { default: fullPath, filename: pathMod.basename(filePath) } };
         } else {
-          const path = config.path || inputData.default || '';
-          const content = await fs.readFile(path, 'utf-8');
+          const readPath = config.path || inputData.default || '';
+          const content = await fs.readFile(readPath, 'utf-8');
           return { result: content, outputs: { default: content } };
         }
       }

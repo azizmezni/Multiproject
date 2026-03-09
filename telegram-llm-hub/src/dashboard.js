@@ -280,6 +280,47 @@ export function createDashboard(port = 9999) {
     }
   });
 
+  // Chat with LLM about a node's script (test/fix assistant)
+  app.post('/api/workflows/nodes/:id/chat', async (req, res) => {
+    const userId = getUserId(req);
+    llm.initDefaults(userId);
+    const node = workflows.getNode(parseInt(req.params.id));
+    if (!node) return res.status(404).json({ error: 'Not found' });
+
+    const { message, script, history } = req.body;
+    const currentScript = script || node.custom_script || '// No script yet';
+
+    const chatMessages = [
+      { role: 'system', content: `You are a code assistant helping debug and fix a workflow node script.
+The node "${node.name}" is of type "${node.node_type}" and does: "${node.description || 'No description'}".
+
+Current script:
+\`\`\`
+${currentScript}
+\`\`\`
+
+Help the user test, debug, and fix this script. When suggesting code changes, wrap the complete fixed script in a \`\`\`fix code block so it can be applied directly. Always return the entire corrected script, not just the changed lines.` },
+      ...(history || []),
+      { role: 'user', content: message },
+    ];
+
+    try {
+      const result = await llm.chat(userId, chatMessages);
+      // Extract fixed code if present
+      let fixedScript = null;
+      const fixMatch = result.text.match(/```fix\n?([\s\S]*?)```/);
+      if (fixMatch) {
+        fixedScript = fixMatch[1].trim();
+      } else {
+        const codeMatch = result.text.match(/```(?:javascript|js|bash)?\n?([\s\S]*?)```/);
+        if (codeMatch && codeMatch[1].trim().length > 20) fixedScript = codeMatch[1].trim();
+      }
+      res.json({ reply: result.text, fixedScript, provider: result.provider, model: result.model });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   // Save a custom script to a node
   app.put('/api/workflows/nodes/:id/script', (req, res) => {
     const nodeId = parseInt(req.params.id);
