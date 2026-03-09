@@ -677,6 +677,56 @@ body {
   padding: 6px 10px;
 }
 
+/* ========== AUTO-FIX PROGRESS ========== */
+.af-node-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  margin-bottom: 4px;
+  background: var(--bg);
+  transition: all 0.3s;
+  border-left: 3px solid transparent;
+}
+.af-status {
+  font-size: 18px;
+  min-width: 24px;
+  text-align: center;
+}
+.af-node-name {
+  font-weight: 600;
+  font-size: 13px;
+  min-width: 180px;
+}
+.af-node-msg {
+  flex: 1;
+  text-align: right;
+  font-size: 11px;
+  color: var(--text2);
+}
+.btn-autofix {
+  background: linear-gradient(135deg, var(--orange), var(--pink));
+  border: none;
+  color: #fff;
+  font-weight: 700;
+}
+.btn-autofix:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 16px rgba(245,158,11,0.3);
+}
+
+/* ========== EXPORT CARDS ========== */
+.export-card {
+  cursor: pointer;
+  transition: all 0.3s;
+}
+.export-card:hover {
+  border-color: var(--cyan);
+  transform: translateY(-2px);
+  box-shadow: 0 4px 20px rgba(0,240,255,0.1);
+}
+
 /* ========== EXPAND PLANS ========== */
 .expand-plans { display: flex; flex-direction: column; gap: 12px; }
 .expand-plan-card {

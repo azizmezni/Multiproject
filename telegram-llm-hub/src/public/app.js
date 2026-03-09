@@ -377,6 +377,8 @@ async function viewWorkflow(wfId) {
         <button class="btn btn-sm" onclick="renderWorkflows(document.getElementById('content'))">← Back</button>
         <button class="btn btn-sm btn-primary" onclick="addNodePrompt(${wf.id})">+ Node</button>
         <button class="btn btn-sm" onclick="executeWorkflow(${wf.id})">⚡ Run</button>
+        <button class="btn btn-sm btn-autofix" onclick="autoFixWorkflow(${wf.id})">🔧 Mini Fix</button>
+        <button class="btn btn-sm" onclick="exportWorkflow(${wf.id})">📦 Export</button>
         <button class="btn btn-sm btn-danger" onclick="deleteWorkflow(${wf.id})">🗑️</button>
       </div>
     </div>
@@ -798,6 +800,210 @@ function applyScriptFix() {
     editor.value = window._lastScriptFix;
     showToast('✨', 'Script fix applied! Click Save Script to keep it.');
   }
+}
+
+// ===================== AUTO-FIX WORKFLOW =====================
+function getExecutionOrder(nodes, edges) {
+  const inDegree = new Map();
+  const adj = new Map();
+  for (const n of nodes) { inDegree.set(n.id, 0); adj.set(n.id, []); }
+  for (const e of edges) {
+    adj.get(e.from_node_id)?.push(e.to_node_id);
+    inDegree.set(e.to_node_id, (inDegree.get(e.to_node_id) || 0) + 1);
+  }
+  const queue = [];
+  for (const [id, deg] of inDegree) { if (deg === 0) queue.push(id); }
+  const order = [];
+  while (queue.length > 0) {
+    const curr = queue.shift();
+    order.push(curr);
+    for (const next of (adj.get(curr) || [])) {
+      inDegree.set(next, inDegree.get(next) - 1);
+      if (inDegree.get(next) === 0) queue.push(next);
+    }
+  }
+  return order.map(id => nodes.find(n => n.id === id)).filter(Boolean);
+}
+
+async function autoFixWorkflow(wfId) {
+  const wf = await GET(`/workflows/${wfId}`);
+  const nodes = wf.nodes || [];
+  const edges = wf.edges || [];
+
+  if (nodes.length === 0) { showToast('⚠️', 'No nodes to fix'); return; }
+
+  const orderedNodes = getExecutionOrder(nodes, edges);
+
+  const nodeStatusHtml = orderedNodes.map(n => {
+    const nt = state.nodeTypes[n.node_type] || { emoji: '⚙️' };
+    return `<div class="af-node-row" id="af-node-${n.id}">
+      <span class="af-status" id="af-status-${n.id}">⏳</span>
+      <span class="af-node-name">${nt.emoji} ${escapeHtml(n.name)}</span>
+      <span class="af-node-msg" id="af-msg-${n.id}">Waiting...</span>
+    </div>`;
+  }).join('');
+
+  showWideModal('🔧 Auto-Fix Workflow', `
+    <p style="color:var(--text2);margin-bottom:16px">Testing each node in order, auto-fixing failures with AI (up to 3 retries per node)...</p>
+    <div id="af-progress">${nodeStatusHtml}</div>
+    <div id="af-summary" style="margin-top:16px;padding:12px;background:var(--bg);border-radius:8px;display:none"></div>
+    <div style="margin-top:16px"><button class="btn" onclick="closeModal()">Close</button></div>
+  `);
+
+  const nodeResults = new Map();
+  let passed = 0, failed = 0, fixed = 0;
+  const MAX_RETRIES = 3;
+
+  for (const node of orderedNodes) {
+    const statusEl = document.getElementById(`af-status-${node.id}`);
+    const msgEl = document.getElementById(`af-msg-${node.id}`);
+    const rowEl = document.getElementById(`af-node-${node.id}`);
+
+    // Build input from upstream results
+    const testInput = {};
+    const incoming = edges.filter(e => e.to_node_id === node.id);
+    for (const e of incoming) {
+      const src = nodeResults.get(e.from_node_id);
+      if (src) testInput[e.to_input] = src.outputs?.[e.from_output] || src.result || '';
+    }
+    if (Object.keys(testInput).length === 0) testInput.default = '';
+
+    statusEl.textContent = '🔄';
+    msgEl.textContent = 'Testing...';
+    msgEl.style.color = 'var(--cyan)';
+
+    try {
+      let testResult = await POST(`/workflows/nodes/${node.id}/test`, { input: testInput });
+
+      let retries = 0;
+      while (!testResult.ok && retries < MAX_RETRIES) {
+        retries++;
+        statusEl.textContent = '🔧';
+        msgEl.textContent = `Fix attempt ${retries}/${MAX_RETRIES}...`;
+        msgEl.style.color = 'var(--orange)';
+
+        const scriptData = await GET(`/workflows/nodes/${node.id}/script`);
+        const currentScript = scriptData.script || scriptData.prompt || '';
+
+        const chatResult = await POST(`/workflows/nodes/${node.id}/chat`, {
+          message: `This script FAILED with error:\n\`\`\`\n${testResult.error}\n\`\`\`\n\nTest input was:\n\`\`\`json\n${JSON.stringify(testInput, null, 2)}\n\`\`\`\n\nPlease fix the script so it works correctly with this input. Return the complete fixed script.`,
+          script: currentScript,
+          history: [],
+        });
+
+        if (chatResult.fixedScript) {
+          await PUT(`/workflows/nodes/${node.id}/script`, { script: chatResult.fixedScript });
+          msgEl.textContent = `Re-testing after fix ${retries}...`;
+          testResult = await POST(`/workflows/nodes/${node.id}/test`, { input: testInput });
+        } else {
+          break;
+        }
+      }
+
+      if (testResult.ok) {
+        statusEl.textContent = '✅';
+        msgEl.textContent = `Passed (${testResult.duration}ms)${retries > 0 ? ` — auto-fixed in ${retries} attempt${retries > 1 ? 's' : ''}` : ''}`;
+        msgEl.style.color = 'var(--green)';
+        rowEl.style.borderLeft = '3px solid var(--green)';
+        nodeResults.set(node.id, testResult.output);
+        passed++;
+        if (retries > 0) fixed++;
+      } else {
+        statusEl.textContent = '❌';
+        msgEl.textContent = `Failed after ${retries} fix attempts: ${(testResult.error || '').substring(0, 80)}`;
+        msgEl.style.color = 'var(--red)';
+        rowEl.style.borderLeft = '3px solid var(--red)';
+        failed++;
+        nodeResults.set(node.id, testResult.output || { result: '', outputs: { default: '' } });
+      }
+    } catch (err) {
+      statusEl.textContent = '❌';
+      msgEl.textContent = `Error: ${err.message}`;
+      msgEl.style.color = 'var(--red)';
+      rowEl.style.borderLeft = '3px solid var(--red)';
+      failed++;
+    }
+  }
+
+  const summaryEl = document.getElementById('af-summary');
+  summaryEl.style.display = 'block';
+  summaryEl.innerHTML = `
+    <div style="font-weight:700;margin-bottom:8px">🔧 Auto-Fix Complete</div>
+    <div style="display:flex;gap:16px;font-size:13px">
+      <span style="color:var(--green)">✅ ${passed} passed</span>
+      <span style="color:var(--orange)">🔧 ${fixed} auto-fixed</span>
+      <span style="color:var(--red)">❌ ${failed} failed</span>
+    </div>
+  `;
+
+  await refreshAll();
+}
+
+// ===================== EXPORT WORKFLOW =====================
+function exportWorkflow(wfId) {
+  showWideModal('📦 Export Workflow', `
+    <p style="color:var(--text2);margin-bottom:16px">Choose an export format:</p>
+    <div class="grid grid-2" style="gap:12px">
+      <div class="card export-card" onclick="doExport(${wfId},'json')">
+        <div class="card-title">📄 JSON Backup</div>
+        <div class="card-subtitle">Raw workflow definition with all nodes, edges, and scripts. Import or share later.</div>
+      </div>
+      <div class="card export-card" onclick="doExport(${wfId},'nodejs')">
+        <div class="card-title">📦 Node.js Project</div>
+        <div class="card-subtitle">Standalone runnable project with package.json, individual node files, and workflow runner.</div>
+      </div>
+      <div class="card export-card" onclick="doExport(${wfId},'api')">
+        <div class="card-title">🌐 API Server</div>
+        <div class="card-subtitle">Express REST server exposing the workflow as a POST /run endpoint.</div>
+      </div>
+      <div class="card export-card" onclick="doExport(${wfId},'docker')">
+        <div class="card-title">🐳 Docker Project</div>
+        <div class="card-subtitle">Containerized API server with Dockerfile and docker-compose.yml, ready to deploy.</div>
+      </div>
+    </div>
+    <div style="margin-top:16px"><button class="btn" onclick="closeModal()">Cancel</button></div>
+  `);
+}
+
+async function doExport(wfId, format) {
+  showWideModal('📦 Exporting...', '<div class="nd-test-running"><div class="nd-spinner"></div> Generating export files...</div>');
+
+  try {
+    const result = await POST(`/workflows/${wfId}/export`, { format });
+
+    if (format === 'json') {
+      const blob = new Blob([JSON.stringify(result.data, null, 2)], { type: 'application/json' });
+      downloadBlob(blob, result.filename || 'workflow.json');
+      showToast('📄', 'JSON exported!');
+      closeModal();
+    } else {
+      const filesHtml = result.files.map(f =>
+        `<div style="font-size:12px;padding:4px 8px;background:var(--bg);border-radius:4px;margin:2px 0;font-family:monospace">${escapeHtml(f)}</div>`
+      ).join('');
+
+      showWideModal(`📦 Export Complete — ${format.toUpperCase()}`, `
+        <p style="color:var(--green);margin-bottom:12px">✅ ${result.files.length} files generated!</p>
+        <div style="margin-bottom:12px"><strong>Location:</strong> <code style="color:var(--cyan)">${escapeHtml(result.outputDir)}</code></div>
+        <div class="nd-section-title" style="font-size:12px">Generated Files</div>
+        <div style="max-height:250px;overflow-y:auto">${filesHtml}</div>
+        <div class="btn-group" style="margin-top:16px">
+          <button class="btn btn-primary" onclick="closeModal()">Done</button>
+        </div>
+      `);
+    }
+  } catch (err) {
+    showModal('❌ Export Error', `<p style="color:var(--red)">${escapeHtml(err.message)}</p><button class="btn" onclick="closeModal()">Close</button>`);
+  }
+}
+
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => { document.body.removeChild(a); URL.revokeObjectURL(url); }, 100);
 }
 
 async function testNodeRun(nodeId) {

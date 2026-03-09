@@ -377,6 +377,217 @@ Help the user test, debug, and fix this script. When suggesting code changes, wr
     res.json(NODE_TYPES);
   });
 
+  // Export workflow in various formats
+  app.post('/api/workflows/:id/export', async (req, res) => {
+    const wfId = parseInt(req.params.id);
+    const { format } = req.body;
+    const wf = workflows.get(wfId);
+    if (!wf) return res.status(404).json({ error: 'Not found' });
+
+    const nodes = workflows.getNodes(wfId);
+    const edges = workflows.getEdges(wfId);
+    const safeName = (wf.title || 'workflow').replace(/[^a-zA-Z0-9_\- ]/g, '_').replace(/\s+/g, '_').substring(0, 50);
+
+    // JSON export — return inline
+    if (format === 'json') {
+      const data = {
+        workflow: wf,
+        nodes: nodes.map(n => ({ ...n, custom_script: n.custom_script || null })),
+        edges,
+        exportedAt: new Date().toISOString(),
+        version: '1.0',
+      };
+      return res.json({ data, filename: `${safeName}.json` });
+    }
+
+    const fs = await import('fs/promises');
+    const pathMod = await import('path');
+    const exportDir = pathMod.join(process.cwd(), 'output', safeName, `export-${format}`);
+    await fs.mkdir(exportDir, { recursive: true });
+    const files = [];
+
+    async function writeFile(name, content) {
+      const dir = pathMod.dirname(pathMod.join(exportDir, name));
+      await fs.mkdir(dir, { recursive: true });
+      await fs.writeFile(pathMod.join(exportDir, name), content, 'utf-8');
+      files.push(name);
+    }
+
+    // Build node script info
+    const nodeScripts = {};
+    for (const node of nodes) {
+      const script = workflows.getNodeScript(node);
+      const safe = node.name.replace(/[^a-zA-Z0-9_]/g, '_');
+      nodeScripts[node.id] = {
+        filename: `nodes/${safe}.js`,
+        name: node.name,
+        type: node.node_type,
+        raw: node.custom_script || script.script || script.prompt || '',
+        isPrompt: script.language === 'prompt',
+      };
+    }
+
+    // Get execution order
+    let orderedNodes;
+    try { orderedNodes = workflows.getExecutionOrder(wfId); }
+    catch { orderedNodes = nodes; }
+
+    // ---- Common files for nodejs/api/docker ----
+    const pkgDeps = {};
+    if (format === 'api' || format === 'docker') pkgDeps.express = '^4.18.2';
+
+    await writeFile('package.json', JSON.stringify({
+      name: safeName.toLowerCase().replace(/[^a-z0-9_-]/g, '-'),
+      version: '1.0.0',
+      type: 'module',
+      description: `Exported workflow: ${wf.title}`,
+      main: (format === 'api' || format === 'docker') ? 'server.js' : 'index.js',
+      scripts: { start: (format === 'api' || format === 'docker') ? 'node server.js' : 'node index.js' },
+      dependencies: pkgDeps,
+    }, null, 2));
+
+    // Write individual node scripts
+    for (const [nodeId, ns] of Object.entries(nodeScripts)) {
+      if (ns.isPrompt) {
+        await writeFile(ns.filename, [
+          `// LLM Prompt Node: ${ns.name}`,
+          `// Type: ${ns.type}`,
+          `// This node requires an LLM provider\n`,
+          `export const prompt = ${JSON.stringify(ns.raw)};\n`,
+          `export default async function execute(inputData, config) {`,
+          `  const filled = prompt.replace(/\\{\\{inputData\\}\\}/g, JSON.stringify(inputData));`,
+          `  // TODO: Replace with your LLM call`,
+          `  console.log('[LLM Prompt]', filled.substring(0, 200) + '...');`,
+          `  return { result: 'LLM response placeholder', outputs: { default: '' } };`,
+          `}\n`,
+        ].join('\n'));
+      } else {
+        const body = ns.raw ? ns.raw.split('\n').map(l => '  ' + l).join('\n') : '  return { result: inputData.default || "", outputs: { default: inputData.default || "" } };';
+        await writeFile(ns.filename, [
+          `// Node: ${ns.name}`,
+          `// Type: ${ns.type}\n`,
+          `export default async function execute(inputData, config) {`,
+          body,
+          `}\n`,
+        ].join('\n'));
+      }
+    }
+
+    // Workflow definition
+    await writeFile('workflow.json', JSON.stringify({ workflow: wf, nodes, edges }, null, 2));
+
+    // ---- Runner (index.js) ----
+    const imports = orderedNodes.map((n, i) => `import node${i} from './${nodeScripts[n.id].filename}';`).join('\n');
+    const nodeList = orderedNodes.map((n, i) => `  { id: ${n.id}, name: ${JSON.stringify(n.name)}, execute: node${i} }`).join(',\n');
+    const runner = `${imports}
+
+const nodes = [\n${nodeList}\n];
+const edges = ${JSON.stringify(edges, null, 2)};
+
+export async function runWorkflow(initialInput = {}) {
+  console.log('🔀 Running workflow: ${wf.title.replace(/'/g, "\\'")}');
+  const results = new Map();
+
+  for (const node of nodes) {
+    const incoming = edges.filter(e => e.to_node_id === node.id);
+    const inputData = {};
+    for (const e of incoming) {
+      const src = results.get(e.from_node_id);
+      if (src) inputData[e.to_input] = src.outputs?.[e.from_output] || src.result || '';
+    }
+    if (Object.keys(inputData).length === 0) Object.assign(inputData, initialInput);
+
+    console.log(\`  ⚙️  \${node.name}...\`);
+    try {
+      const result = await node.execute(inputData, {});
+      results.set(node.id, result);
+      console.log(\`  ✅ \${node.name}: done\`);
+    } catch (err) {
+      console.error(\`  ❌ \${node.name}: \${err.message}\`);
+      results.set(node.id, { result: err.message, outputs: { default: '', error: err.message } });
+    }
+  }
+
+  console.log('\\n✅ Workflow complete!');
+  return Object.fromEntries(results);
+}
+
+// CLI entry
+runWorkflow({ default: process.argv[2] || '' }).catch(console.error);
+`;
+    await writeFile('index.js', runner);
+
+    // ---- API Server (for api and docker) ----
+    if (format === 'api' || format === 'docker') {
+      const server = `import express from 'express';
+${imports}
+
+const app = express();
+app.use(express.json());
+const PORT = process.env.PORT || 3000;
+
+const nodeList = [\n${nodeList}\n];
+const edges = ${JSON.stringify(edges, null, 2)};
+
+app.post('/run', async (req, res) => {
+  const initialInput = req.body.input || { default: '' };
+  const results = new Map();
+
+  for (const node of nodeList) {
+    const incoming = edges.filter(e => e.to_node_id === node.id);
+    const inputData = {};
+    for (const e of incoming) {
+      const src = results.get(e.from_node_id);
+      if (src) inputData[e.to_input] = src.outputs?.[e.from_output] || src.result || '';
+    }
+    if (Object.keys(inputData).length === 0) Object.assign(inputData, initialInput);
+
+    try {
+      const result = await node.execute(inputData, {});
+      results.set(node.id, result);
+    } catch (err) {
+      results.set(node.id, { result: err.message, outputs: { default: '', error: err.message } });
+    }
+  }
+
+  res.json({ results: Object.fromEntries(results) });
+});
+
+app.get('/health', (req, res) => res.json({ status: 'ok', workflow: ${JSON.stringify(wf.title)} }));
+app.listen(PORT, () => console.log(\`🌐 Workflow API on port \${PORT}\`));
+`;
+      await writeFile('server.js', server);
+    }
+
+    // ---- Docker files ----
+    if (format === 'docker') {
+      await writeFile('Dockerfile', `FROM node:20-alpine
+WORKDIR /app
+COPY package*.json ./
+RUN npm install --production
+COPY . .
+EXPOSE 3000
+CMD ["node", "server.js"]
+`);
+      await writeFile('docker-compose.yml', `version: '3.8'
+services:
+  workflow:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+    restart: unless-stopped
+`);
+      await writeFile('.dockerignore', `node_modules
+.env
+*.db
+`);
+    }
+
+    res.json({ files, outputDir: exportDir, format });
+  });
+
   // ==================== DRAFTS ====================
   app.get('/api/drafts', (req, res) => {
     res.json(drafts.listByUser(getUserId(req)));
