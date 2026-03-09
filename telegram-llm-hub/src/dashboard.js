@@ -225,17 +225,35 @@ export function createDashboard(port = 9999) {
     // Also gather real input from connected nodes
     const edges = workflows.getEdges(node.workflow_id);
     const incoming = edges.filter(e => e.to_node_id === node.id);
+    const outgoing = edges.filter(e => e.from_node_id === node.id);
     const connectedInputs = {};
+    const connections = { incoming: [], outgoing: [] };
     for (const e of incoming) {
       const srcNode = workflows.getNode(e.from_node_id);
-      if (srcNode?.result) {
-        try {
-          const parsed = JSON.parse(srcNode.result);
-          connectedInputs[e.to_input] = parsed.outputs?.[e.from_output] || parsed.result || '';
-        } catch { connectedInputs[e.to_input] = ''; }
+      if (srcNode) {
+        connections.incoming.push({
+          nodeId: srcNode.id, name: srcNode.name, type: srcNode.node_type,
+          fromOutput: e.from_output, toInput: e.to_input,
+          hasResult: !!srcNode.result,
+        });
+        if (srcNode.result) {
+          try {
+            const parsed = JSON.parse(srcNode.result);
+            connectedInputs[e.to_input] = parsed.outputs?.[e.from_output] || parsed.result || '';
+          } catch { connectedInputs[e.to_input] = ''; }
+        }
       }
     }
-    res.json({ ...script, connectedInputs, node: { id: node.id, name: node.name, node_type: node.node_type, description: node.description } });
+    for (const e of outgoing) {
+      const dstNode = workflows.getNode(e.to_node_id);
+      if (dstNode) {
+        connections.outgoing.push({
+          nodeId: dstNode.id, name: dstNode.name, type: dstNode.node_type,
+          fromOutput: e.from_output, toInput: e.to_input,
+        });
+      }
+    }
+    res.json({ ...script, connectedInputs, connections, node: { id: node.id, name: node.name, node_type: node.node_type, description: node.description } });
   });
 
   // Test a single node with custom input

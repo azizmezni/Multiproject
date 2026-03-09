@@ -547,17 +547,50 @@ Return ONLY "true" or "false".`;
     const inputs = node._inputs || [];
     const outputs = node._outputs || [];
 
-    // Gather context from connected nodes
+    // Gather context from connected nodes — include their output data/schema
     const edges = this.getEdges(node.workflow_id);
     const incoming = edges.filter(e => e.to_node_id === node.id);
     const outgoing = edges.filter(e => e.from_node_id === node.id);
-    const connectedContext = incoming.map(e => {
+
+    const connectedInputDetails = incoming.map(e => {
       const src = this.getNode(e.from_node_id);
-      return src ? `- From "${src.name}" (${src.node_type}): output "${e.from_output}" → input "${e.to_input}"` : '';
+      if (!src) return '';
+      const srcOutputs = JSON.parse(src.outputs || '[]');
+      const srcConfig = JSON.parse(src.config || '{}');
+
+      // Try to get the upstream node's last result for schema inference
+      let outputSample = '';
+      if (src.result) {
+        try {
+          const parsed = JSON.parse(src.result);
+          // Show just a compact example of what this node outputs
+          outputSample = `\n    Last output sample: ${JSON.stringify(parsed, null, 2).substring(0, 500)}`;
+        } catch {
+          outputSample = `\n    Last output (text): ${src.result.substring(0, 300)}`;
+        }
+      }
+
+      // If upstream has a custom script, show a brief summary
+      let scriptHint = '';
+      if (src.custom_script) {
+        scriptHint = `\n    Script preview: ${src.custom_script.substring(0, 200)}...`;
+      }
+
+      return `- From "${src.name}" (${src.node_type}): output "${e.from_output}" → your input "${e.to_input}"
+    Description: ${src.description || 'No description'}
+    Output ports: [${srcOutputs.join(', ')}]${outputSample}${scriptHint}`;
+    }).filter(Boolean).join('\n');
+
+    const connectedOutputDetails = outgoing.map(e => {
+      const dst = this.getNode(e.to_node_id);
+      if (!dst) return '';
+      const dstInputs = JSON.parse(dst.inputs || '[]');
+      return `- To "${dst.name}" (${dst.node_type}): your output "${e.from_output}" → input "${e.to_input}"
+    Description: ${dst.description || 'No description'}
+    Expects input ports: [${dstInputs.join(', ')}]`;
     }).filter(Boolean).join('\n');
 
     const isPromptType = ['process', 'decision'].includes(node.node_type);
-    const isCodeType = ['code', 'cli', 'api', 'file', 'input', 'output', 'merge'].includes(node.node_type);
 
     let systemPrompt, userPrompt;
 
@@ -570,15 +603,21 @@ Description: ${node.description || 'No description'}
 Inputs: [${inputs.join(', ')}]
 Outputs: [${outputs.join(', ')}]
 Config: ${JSON.stringify(config)}
-${connectedContext ? `\nConnected from:\n${connectedContext}` : ''}
+${connectedInputDetails ? `\nUpstream nodes (data coming IN):\n${connectedInputDetails}` : ''}
+${connectedOutputDetails ? `\nDownstream nodes (data going OUT to):\n${connectedOutputDetails}` : ''}
 
-The prompt will receive input data as a JSON string. It should instruct the LLM to process it and return the result.
+The prompt will receive input data as {{inputData}} (a JSON string). It should instruct the LLM to process it and return the result.
+${connectedInputDetails ? 'IMPORTANT: Based on the upstream output samples shown above, the prompt should expect and handle that specific data format.' : ''}
+${connectedOutputDetails ? 'IMPORTANT: The output must be formatted so the downstream nodes can use it properly.' : ''}
 ${node.node_type === 'decision' ? 'The prompt must make the LLM return ONLY "true" or "false".' : ''}`;
     } else {
       systemPrompt = `You are a code generator. Write a JavaScript function body for a workflow node.
 The function receives these variables:
 - inputData: object with input port values (e.g. inputData.default, inputData.somePort)
 - config: node configuration object
+- fetch: for HTTP requests
+- llm: LLM manager (use: await llm.chat(userId, [{role:'user', content:'...'}]))
+- userId: current user ID
 
 It must return: { result: string, outputs: { portName: value, ... } }
 
@@ -591,8 +630,11 @@ Description: ${node.description || 'No description'}
 Inputs: [${inputs.join(', ')}]
 Outputs: [${outputs.join(', ')}]
 Config: ${JSON.stringify(config)}
-${connectedContext ? `\nConnected from:\n${connectedContext}` : ''}
+${connectedInputDetails ? `\nUpstream nodes (data coming IN):\n${connectedInputDetails}` : ''}
+${connectedOutputDetails ? `\nDownstream nodes (data going OUT to):\n${connectedOutputDetails}` : ''}
 
+${connectedInputDetails ? 'IMPORTANT: Based on the upstream output samples shown above, parse/handle the incoming data format correctly.' : ''}
+${connectedOutputDetails ? 'IMPORTANT: Structure the output so downstream nodes can consume it (match their expected input ports).' : ''}
 ${node.node_type === 'cli' ? 'Use child_process exec to run shell commands.' : ''}
 ${node.node_type === 'api' ? 'Use fetch() for HTTP requests.' : ''}
 ${node.node_type === 'file' ? 'Use fs/promises for file operations.' : ''}

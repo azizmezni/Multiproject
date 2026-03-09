@@ -19,7 +19,9 @@ async function api(path, opts = {}) {
     ...opts,
     body: opts.body ? JSON.stringify(opts.body) : undefined,
   });
-  return res.json();
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+  return data;
 }
 const GET = (p) => api(p);
 const POST = (p, b) => api(p, { method: 'POST', body: b });
@@ -512,6 +514,22 @@ async function nodeDetail(nodeId, wfId) {
   const langLabel = scriptData.language === 'prompt' ? 'LLM Prompt' : scriptData.language === 'bash' ? 'Bash' : 'JavaScript';
   const langBadge = scriptData.language === 'prompt' ? 'badge-purple' : scriptData.language === 'bash' ? 'badge-orange' : 'badge-blue';
 
+  // Build connection info HTML
+  const conns = scriptData.connections || { incoming: [], outgoing: [] };
+  let connectionHtml = '';
+  if (conns.incoming.length > 0 || conns.outgoing.length > 0) {
+    const inHtml = conns.incoming.map(c =>
+      `<div class="conn-item conn-in">⬅️ <strong>${escapeHtml(c.name)}</strong> <span class="badge badge-blue" style="font-size:10px">${c.type}</span> <span style="color:var(--text2);font-size:11px">${c.fromOutput} → ${c.toInput}</span>${c.hasResult ? ' <span class="badge badge-green" style="font-size:9px">has data</span>' : ''}</div>`
+    ).join('');
+    const outHtml = conns.outgoing.map(c =>
+      `<div class="conn-item conn-out">➡️ <strong>${escapeHtml(c.name)}</strong> <span class="badge badge-purple" style="font-size:10px">${c.type}</span> <span style="color:var(--text2);font-size:11px">${c.fromOutput} → ${c.toInput}</span></div>`
+    ).join('');
+    connectionHtml = `<div class="nd-connections">
+      <div class="nd-section-title" style="font-size:12px;margin-bottom:6px">🔗 Connections</div>
+      ${inHtml}${outHtml}
+    </div>`;
+  }
+
   // Build test input JSON from connected inputs
   const testInputDefault = Object.keys(scriptData.connectedInputs).length > 0
     ? JSON.stringify(scriptData.connectedInputs, null, 2)
@@ -539,6 +557,7 @@ async function nodeDetail(nodeId, wfId) {
           <button class="btn btn-danger btn-sm" onclick="deleteNode(${nodeId},${wfId})">🗑️ Delete</button>
           <button class="btn btn-sm" onclick="closeModal()">Close</button>
         </div>
+        ${connectionHtml}
       </div>
 
       <!-- RIGHT: Code + Test -->
@@ -580,10 +599,13 @@ async function generateNodeScript(nodeId) {
 
   try {
     const result = await POST(`/workflows/nodes/${nodeId}/generate`);
-    editor.value = result.script || result.prompt || '';
+    const script = result.script || result.prompt || '';
+    if (!script) throw new Error('LLM returned empty script');
+    editor.value = script;
     showToast('🤖', 'Script generated! Click Save Script to keep it.');
   } catch (err) {
     showToast('❌', `Generation failed: ${err.message}`);
+    editor.value = `// Generation failed: ${err.message}\n// Check your LLM provider configuration`;
   } finally {
     btn.disabled = false;
     btn.classList.remove('generating');

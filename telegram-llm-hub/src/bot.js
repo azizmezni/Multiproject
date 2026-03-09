@@ -1,4 +1,4 @@
-import { Telegraf } from 'telegraf';
+import { Telegraf, Markup } from 'telegraf';
 import db from './db.js';
 import { llm } from './llm-manager.js';
 import { sessions, userState } from './sessions.js';
@@ -715,52 +715,119 @@ Only return JSON, no markdown.`
       const result = await llm.chat(ctx.from.id, [
         { role: 'system', content: `You are an expert product strategist and software architect. Analyze the given link/resource and generate 3-5 actionable project plans.
 
-For each plan, provide:
-1. Plan Title - short name
-2. What to Build - concrete description
-3. Key Features - bullet list of 3-5 features
-4. Tech Stack - suggested technologies
-5. APIs/Skills to Extract - what can be reused as skills, knowledge, or integrations
-6. Difficulty - Easy / Medium / Hard
+Return ONLY a valid JSON array. Each item:
+{"title":"Plan Title","description":"What to build (2-3 sentences)","features":["feature1","feature2","feature3"],"techStack":["tech1","tech2"],"skills":["api/skill1","api/skill2"],"difficulty":"Easy|Medium|Hard"}
 
-At the end include:
-Knowledge & Skills to Extract:
-- List APIs, libraries, patterns, or data that can be extracted and reused.
-
-IMPORTANT: Do NOT use any markdown formatting (no *, **, _, \`, #, etc). Use plain text with dashes (-) for bullets and numbers (1. 2. 3.) for lists. Use UPPERCASE or dashes for emphasis instead.` },
-        { role: 'user', content: `Analyze this resource and generate multiple project plans:\n\nURL: ${draft.url || 'N/A'}\nTitle: ${draft.title}\nDescription: ${draft.description || 'No description'}\n${pageContent ? `\nPage Content:\n${pageContent}` : ''}` }
+Return ONLY the JSON array. No markdown, no extra text, no code fences.` },
+        { role: 'user', content: `Analyze this resource and generate project plans:\n\nURL: ${draft.url || 'N/A'}\nTitle: ${draft.title}\nDescription: ${draft.description || 'No description'}\n${pageContent ? `\nPage Content:\n${pageContent}` : ''}` }
       ]);
 
-      drafts.updateContent(draft.id, draft.title, result.text, draft.content || pageContent);
+      // Parse plans from LLM response
+      let plans = [];
+      try {
+        const cleaned = result.text.replace(/```json?\n?/g, '').replace(/```/g, '').trim();
+        const jsonMatch = cleaned.match(/\[[\s\S]*\]/);
+        if (jsonMatch) plans = JSON.parse(jsonMatch[0]);
+      } catch {
+        plans = [{ title: draft.title || 'Plan', description: result.text.substring(0, 500), features: [], techStack: [], skills: [], difficulty: 'Medium' }];
+      }
 
-      // Strip any markdown the LLM might have added anyway
-      const cleanText = stripMd(result.text);
-      const header = `Plans for: ${draft.title}\n\n`;
-      const maxLen = 3800;
-      const fullMsg = header + cleanText;
+      // Store plans in draft content for later retrieval
+      drafts.updateContent(draft.id, draft.title, JSON.stringify(plans), draft.content || pageContent);
 
-      if (fullMsg.length <= maxLen) {
-        await ctx.reply(fullMsg, kb.draftActions(draft.id));
+      // Send each plan as a readable message
+      const header = `Plans for: ${stripMd(draft.title || 'Draft')}\n\n`;
+      let plansText = '';
+      for (let i = 0; i < plans.length; i++) {
+        const p = plans[i];
+        plansText += `${i + 1}. ${stripMd(p.title || 'Untitled')}\n`;
+        plansText += `   ${stripMd(p.description || 'No description')}\n`;
+        if (p.features?.length) plansText += `   Features: ${p.features.map(f => stripMd(f)).join(', ')}\n`;
+        if (p.techStack?.length) plansText += `   Tech: ${p.techStack.map(t => stripMd(t)).join(', ')}\n`;
+        if (p.skills?.length) plansText += `   Skills/APIs: ${p.skills.map(s => stripMd(s)).join(', ')}\n`;
+        plansText += `   Difficulty: ${p.difficulty || 'Medium'}\n\n`;
+      }
+
+      const fullMsg = header + plansText + 'Select a plan below to build it:';
+
+      // Build selection buttons — one per plan + back
+      const planButtons = plans.map((p, i) => [
+        Markup.button.callback(`${i + 1}. ${(p.title || 'Plan').substring(0, 40)} (${p.difficulty || '?'})`, `draft_select_plan:${draft.id}:${i}`)
+      ]);
+      planButtons.push([Markup.button.callback('\ud83d\udccb Clone All as Board', `draft_clone:${draft.id}`)]);
+      planButtons.push([Markup.button.callback('\ud83d\udca1 Re-Expand', `draft_expand:${draft.id}`), Markup.button.callback('\u25c0\ufe0f Back', 'list_drafts')]);
+
+      // Send (chunked if needed)
+      if (fullMsg.length <= 3800) {
+        await ctx.reply(fullMsg, Markup.inlineKeyboard(planButtons));
       } else {
-        // Send in chunks — no Markdown at all
+        // Split: send plans text first, then selection message
         const chunks = [];
-        let remaining = cleanText;
+        let remaining = plansText;
+        const maxLen = 3800;
         while (remaining.length > 0) {
-          // Try to split at a newline near the limit
           let splitAt = maxLen;
           const nlPos = remaining.lastIndexOf('\n', maxLen);
           if (nlPos > maxLen * 0.5) splitAt = nlPos + 1;
           chunks.push(remaining.substring(0, splitAt));
           remaining = remaining.substring(splitAt);
         }
-        for (let i = 0; i < chunks.length; i++) {
-          const prefix = i === 0 ? header : '';
-          const extra = i === chunks.length - 1 ? kb.draftActions(draft.id) : {};
-          await ctx.reply(prefix + chunks[i], extra);
+        for (const chunk of chunks) {
+          await ctx.reply(chunk);
         }
+        await ctx.reply('Select a plan to build:', Markup.inlineKeyboard(planButtons));
       }
     } catch (err) {
       await ctx.reply(`Error: ${err.message}`);
+    }
+  });
+
+  // Handle plan selection from expand results
+  bot.action(/draft_select_plan:(\d+):(\d+)/, async (ctx) => {
+    await ctx.answerCbQuery();
+    const draftId = parseInt(ctx.match[1]);
+    const planIndex = parseInt(ctx.match[2]);
+    const draft = drafts.get(draftId);
+    if (!draft) return;
+
+    // Retrieve stored plans
+    let plans = [];
+    try {
+      plans = JSON.parse(draft.description || '[]');
+    } catch {
+      try { plans = JSON.parse(draft.content || '[]'); } catch {}
+    }
+
+    const plan = plans[planIndex];
+    if (!plan) {
+      await ctx.reply('Plan not found. Try expanding the idea again.');
+      return;
+    }
+
+    await ctx.editMessageText(`Building: ${stripMd(plan.title || 'Plan')}...\n\nGenerating tasks from this plan...`);
+
+    try {
+      const planContext = `Title: ${plan.title}\nDescription: ${plan.description}\nFeatures: ${(plan.features || []).join(', ')}\nTech: ${(plan.techStack || []).join(', ')}\nSkills/APIs: ${(plan.skills || []).join(', ')}`;
+
+      const result = await llm.chat(ctx.from.id, [
+        { role: 'system', content: 'You are a project planner. Create a detailed task breakdown for the given plan. Return a JSON array of tasks: [{"title":"...","description":"...","requires_input":false,"input_question":null,"tools_needed":[]}]. Only return JSON, no markdown.' },
+        { role: 'user', content: `Create a project board with tasks for this plan:\n\n${planContext}\n\nOriginal source: ${draft.url || 'N/A'}` },
+      ]);
+
+      let taskList;
+      try {
+        taskList = JSON.parse(result.text.replace(/```json?\n?/g, '').replace(/```/g, '').trim());
+      } catch { taskList = [{ title: 'Review and plan', description: result.text.substring(0, 500) }]; }
+
+      const board = boards.create(ctx.from.id, plan.title || 'Project');
+      boards.addTasksFromPlan(board.id, taskList);
+      drafts.updateStatus(draftId, 'processed');
+      userState.setActiveBoard(ctx.from.id, board.id);
+
+      const tasks = boards.getTasks(board.id);
+      await ctx.reply(`Board created: ${stripMd(plan.title)}\n${tasks.length} tasks generated!`, kb.boardView(board.id, tasks, 'planning'));
+    } catch (err) {
+      await ctx.reply(`Error creating board: ${err.message}`);
     }
   });
 

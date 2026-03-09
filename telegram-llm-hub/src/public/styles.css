@@ -575,6 +575,23 @@ body {
   flex-wrap: wrap;
 }
 
+/* ========== NODE CONNECTIONS ========== */
+.nd-connections {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+.conn-item {
+  font-size: 12px;
+  padding: 4px 8px;
+  margin-bottom: 4px;
+  border-radius: 4px;
+  background: var(--bg);
+}
+.conn-item strong { color: var(--text); }
+.conn-in { border-left: 2px solid var(--green); }
+.conn-out { border-left: 2px solid var(--purple); }
+
 /* ========== EXPAND PLANS ========== */
 .expand-plans { display: flex; flex-direction: column; gap: 12px; }
 .expand-plan-card {
