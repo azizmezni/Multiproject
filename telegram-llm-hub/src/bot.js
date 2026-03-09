@@ -1379,6 +1379,13 @@ Return ONLY valid JSON.` },
     text += `\nInputs: ${node._inputs.join(', ') || 'none'}`;
     text += `\nOutputs: ${node._outputs.join(', ') || 'none'}`;
 
+    // Show env vars count
+    const envVars = node._config?.env || {};
+    const envCount = Object.keys(envVars).length;
+    if (envCount > 0) {
+      text += `\n\n🔑 Env vars: ${Object.keys(envVars).map(k => `\`${k}\``).join(', ')}`;
+    }
+
     if (incoming.length > 0) {
       text += '\n\nConnected from:';
       for (const e of incoming) {
@@ -1403,6 +1410,9 @@ Return ONLY valid JSON.` },
     buttons.push([
       { text: '\u270f\ufe0f Edit Inputs', callback_data: `wf_edit_io:${nodeId}:inputs` },
       { text: '\u270f\ufe0f Edit Outputs', callback_data: `wf_edit_io:${nodeId}:outputs` },
+    ]);
+    buttons.push([
+      { text: `🔑 Env Vars (${envCount})`, callback_data: `wf_env:${nodeId}` },
     ]);
     buttons.push([
       { text: '\ud83d\uddd1\ufe0f Delete', callback_data: `wf_delnode:${nodeId}` },
@@ -1525,6 +1535,112 @@ Return ONLY valid JSON.` },
       `Send the ${field} as comma-separated names:\n\nExample: \`data, config, options\``,
       { parse_mode: 'Markdown' }
     );
+  });
+
+  // --- Env Vars management from Telegram ---
+  bot.action(/wf_env:(\d+)/, async (ctx) => {
+    await ctx.answerCbQuery();
+    const nodeId = parseInt(ctx.match[1]);
+    const node = workflows.getNode(nodeId);
+    if (!node) return;
+
+    const env = node._config?.env || {};
+    const keys = Object.keys(env);
+
+    let text = `🔑 *Env Variables — ${node.name}*\n\n`;
+    if (keys.length > 0) {
+      for (const k of keys) {
+        const masked = env[k].length > 4
+          ? env[k].substring(0, 2) + '•'.repeat(Math.min(env[k].length - 4, 8)) + env[k].slice(-2)
+          : '••••';
+        text += `\`${k}\` = \`${masked}\`\n`;
+      }
+    } else {
+      text += '_No env vars set_\n';
+    }
+    text += '\nUse `env.KEY` in JS scripts or `{{KEY}}` in prompts.';
+
+    const buttons = [
+      [{ text: '➕ Add Variable', callback_data: `wf_env_add:${nodeId}` }],
+    ];
+    if (keys.length > 0) {
+      buttons.push([{ text: '🗑️ Remove Variable', callback_data: `wf_env_del:${nodeId}` }]);
+    }
+    buttons.push([{ text: '◀️ Back', callback_data: `wf_nodedetail:${nodeId}` }]);
+
+    await ctx.editMessageText(text, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: buttons } });
+  });
+
+  // Add env var — ask user for KEY=VALUE
+  bot.action(/wf_env_add:(\d+)/, async (ctx) => {
+    await ctx.answerCbQuery();
+    const nodeId = parseInt(ctx.match[1]);
+    userState.setAwaiting(ctx.from.id, `wf_env_add:${nodeId}`);
+    await ctx.editMessageText(
+      '➕ *Add Environment Variable*\n\n' +
+      'Send in format: `KEY=value`\n\n' +
+      'Examples:\n' +
+      '• `API_KEY=sk-abc123def456`\n' +
+      '• `BASE_URL=https://api.example.com`\n' +
+      '• `DEBUG=true`',
+      { parse_mode: 'Markdown' }
+    );
+  });
+
+  // Remove env var — show list to pick from
+  bot.action(/wf_env_del:(\d+)/, async (ctx) => {
+    await ctx.answerCbQuery();
+    const nodeId = parseInt(ctx.match[1]);
+    const node = workflows.getNode(nodeId);
+    if (!node) return;
+
+    const env = node._config?.env || {};
+    const buttons = Object.keys(env).map(k => [
+      { text: `🗑️ ${k}`, callback_data: `wf_env_remove:${nodeId}:${k}` },
+    ]);
+    buttons.push([{ text: '◀️ Back', callback_data: `wf_env:${nodeId}` }]);
+
+    await ctx.editMessageText('Select variable to remove:', { reply_markup: { inline_keyboard: buttons } });
+  });
+
+  // Actually remove an env var
+  bot.action(/wf_env_remove:(\d+):(.+)/, async (ctx) => {
+    await ctx.answerCbQuery('Removed');
+    const nodeId = parseInt(ctx.match[1]);
+    const key = ctx.match[2];
+    const node = workflows.getNode(nodeId);
+    if (!node) return;
+
+    const config = node._config || {};
+    const env = { ...(config.env || {}) };
+    delete env[key];
+    workflows.setNodeConfig(nodeId, { ...config, env });
+
+    // Show updated env list
+    const updatedNode = workflows.getNode(nodeId);
+    const updatedEnv = updatedNode._config?.env || {};
+    const keys = Object.keys(updatedEnv);
+
+    let text = `🔑 *Env Variables — ${node.name}*\n\n✅ Removed \`${key}\`\n\n`;
+    if (keys.length > 0) {
+      for (const k of keys) {
+        const masked = updatedEnv[k].length > 4
+          ? updatedEnv[k].substring(0, 2) + '•'.repeat(Math.min(updatedEnv[k].length - 4, 8)) + updatedEnv[k].slice(-2)
+          : '••••';
+        text += `\`${k}\` = \`${masked}\`\n`;
+      }
+    } else {
+      text += '_No env vars remaining_\n';
+    }
+
+    const buttons = [
+      [{ text: '➕ Add Variable', callback_data: `wf_env_add:${nodeId}` }],
+    ];
+    if (keys.length > 0) {
+      buttons.push([{ text: '🗑️ Remove Variable', callback_data: `wf_env_del:${nodeId}` }]);
+    }
+    buttons.push([{ text: '◀️ Back', callback_data: `wf_nodedetail:${nodeId}` }]);
+    await ctx.editMessageText(text, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: buttons } });
   });
 
   // --- Dev Assistant callbacks (from main menu) ---
@@ -1729,6 +1845,43 @@ Return ONLY valid JSON.` },
       const refinedDesc = `${request.description}\n\nAdditional context: ${text}`;
       pendingDevRequests.delete(requestId);
       await handleDevRequest(ctx, userId, request.type, refinedDesc);
+      return;
+    }
+
+    // Handle env var addition
+    if (state.awaiting_input?.startsWith('wf_env_add:')) {
+      const nodeId = parseInt(state.awaiting_input.split(':')[1]);
+      userState.clearAwaiting(userId);
+
+      // Parse KEY=VALUE format (support multiple lines)
+      const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+      const node = workflows.getNode(nodeId);
+      if (!node) return ctx.reply('Node not found.');
+
+      const config = node._config || {};
+      const env = { ...(config.env || {}) };
+      let added = 0;
+
+      for (const line of lines) {
+        const eqIdx = line.indexOf('=');
+        if (eqIdx === -1) continue;
+        const key = line.substring(0, eqIdx).trim();
+        const val = line.substring(eqIdx + 1).trim();
+        if (key) {
+          env[key] = val;
+          added++;
+        }
+      }
+
+      if (added === 0) return ctx.reply('Invalid format. Use `KEY=value`', { parse_mode: 'Markdown' });
+
+      workflows.setNodeConfig(nodeId, { ...config, env });
+      await ctx.reply(
+        `✅ Added ${added} env var(s) to *${node.name}*\n\n` +
+        `Keys: ${Object.keys(env).map(k => `\`${k}\``).join(', ')}\n\n` +
+        `Use \`env.KEY\` in JS or \`{{KEY}}\` in prompts.`,
+        { parse_mode: 'Markdown' }
+      );
       return;
     }
 

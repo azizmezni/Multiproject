@@ -509,6 +509,9 @@ async function nodeDetail(nodeId, wfId) {
   const inputs = JSON.parse(node.inputs || '[]');
   const outputs = JSON.parse(node.outputs || '[]');
 
+  const config = JSON.parse(node.config || '{}');
+  const envVars = config.env || {};
+
   // Fetch script + connected inputs from API
   let scriptData = { language: 'text', script: '', prompt: '', connectedInputs: {}, isCustom: false };
   try { scriptData = await GET(`/workflows/nodes/${nodeId}/script`); } catch {}
@@ -570,6 +573,24 @@ async function nodeDetail(nodeId, wfId) {
         <div class="form-group"><label class="form-label">Description</label><input class="input" id="nd-desc" value="${escapeAttr(node.description || '')}"></div>
         <div class="form-group"><label class="form-label">Inputs</label><input class="input" id="nd-inputs" value="${inputs.join(', ')}"></div>
         <div class="form-group"><label class="form-label">Outputs</label><input class="input" id="nd-outputs" value="${outputs.join(', ')}"></div>
+
+        <!-- Env Vars / Secrets -->
+        <div class="nd-section-title" style="font-size:12px;margin-top:14px;margin-bottom:6px">
+          🔑 Environment Variables
+          <button class="btn btn-sm" style="margin-left:auto;font-size:10px;padding:2px 8px" onclick="addEnvVarRow()">+ Add</button>
+        </div>
+        <div id="nd-env-vars" class="nd-env-vars">
+          ${Object.entries(envVars).map(([k, v]) => `
+            <div class="env-var-row">
+              <input class="input env-key" value="${escapeAttr(k)}" placeholder="KEY">
+              <input class="input env-val" type="password" value="${escapeAttr(v)}" placeholder="value">
+              <button class="btn btn-sm env-toggle" onclick="toggleEnvVisibility(this)" title="Show/Hide">👁️</button>
+              <button class="btn btn-sm btn-danger env-del" onclick="this.parentElement.remove()" title="Remove">×</button>
+            </div>
+          `).join('')}
+        </div>
+        <p style="color:var(--text2);font-size:10px;margin-top:4px">Use as <code>env.KEY</code> in scripts or <code>{{KEY}}</code> in prompts</p>
+
         <div class="btn-group" style="margin-top:12px">
           <button class="btn btn-primary btn-sm" onclick="updateNode(${nodeId},${wfId})">💾 Save</button>
           <button class="btn btn-danger btn-sm" onclick="deleteNode(${nodeId},${wfId})">🗑️ Delete</button>
@@ -1037,10 +1058,43 @@ async function testNodeRun(nodeId) {
     resultEl.innerHTML = `<div style="color:var(--red);padding:10px">❌ ${escapeHtml(err.message)}</div>`;
   }
 }
+function addEnvVarRow() {
+  const container = document.getElementById('nd-env-vars');
+  const row = document.createElement('div');
+  row.className = 'env-var-row';
+  row.innerHTML = `
+    <input class="input env-key" value="" placeholder="KEY">
+    <input class="input env-val" type="password" value="" placeholder="value">
+    <button class="btn btn-sm env-toggle" onclick="toggleEnvVisibility(this)" title="Show/Hide">👁️</button>
+    <button class="btn btn-sm btn-danger env-del" onclick="this.parentElement.remove()" title="Remove">×</button>
+  `;
+  container.appendChild(row);
+  row.querySelector('.env-key').focus();
+}
+function toggleEnvVisibility(btn) {
+  const input = btn.parentElement.querySelector('.env-val');
+  input.type = input.type === 'password' ? 'text' : 'password';
+  btn.textContent = input.type === 'password' ? '👁️' : '🙈';
+}
+function collectEnvVars() {
+  const env = {};
+  document.querySelectorAll('#nd-env-vars .env-var-row').forEach(row => {
+    const key = row.querySelector('.env-key')?.value?.trim();
+    const val = row.querySelector('.env-val')?.value || '';
+    if (key) env[key] = val;
+  });
+  return env;
+}
 async function updateNode(nodeId, wfId) {
   const inputs = document.getElementById('nd-inputs').value.split(',').map(s => s.trim()).filter(Boolean);
   const outputs = document.getElementById('nd-outputs').value.split(',').map(s => s.trim()).filter(Boolean);
-  await PUT(`/workflows/nodes/${nodeId}`, { name: document.getElementById('nd-name').value, description: document.getElementById('nd-desc').value, inputs, outputs });
+  const env = collectEnvVars();
+  await PUT(`/workflows/nodes/${nodeId}`, {
+    name: document.getElementById('nd-name').value,
+    description: document.getElementById('nd-desc').value,
+    inputs, outputs,
+    config: { env },
+  });
   closeModal(); await refreshAll(); viewWorkflow(wfId);
 }
 async function deleteNode(nodeId, wfId) { await DEL(`/workflows/nodes/${nodeId}`); closeModal(); await refreshAll(); viewWorkflow(wfId); }

@@ -458,10 +458,15 @@ Return ONLY "true" or "false".`;
   // Execute a custom script saved on a node
   async _executeCustomScript(userId, node, inputData, config) {
     const isPromptType = ['process', 'decision'].includes(node.node_type);
+    const env = config.env || {};
 
     if (isPromptType) {
-      // Custom script is an LLM prompt — fill in inputData placeholder and call LLM
-      const prompt = node.custom_script.replace(/\{\{inputData\}\}/g, JSON.stringify(inputData));
+      // Custom script is an LLM prompt — fill in inputData and env var placeholders
+      let prompt = node.custom_script.replace(/\{\{inputData\}\}/g, JSON.stringify(inputData));
+      // Replace {{ENV_VAR_NAME}} with values from env
+      for (const [key, val] of Object.entries(env)) {
+        prompt = prompt.replace(new RegExp(`\\{\\{${key}\\}\\}`, 'g'), val);
+      }
       const result = await llm.chat(userId, [
         { role: 'system', content: 'Follow the instructions precisely.' },
         { role: 'user', content: prompt },
@@ -476,11 +481,11 @@ Return ONLY "true" or "false".`;
       return { result: result.text, outputs: { default: result.text } };
     }
 
-    // Custom script is JavaScript code — execute it
+    // Custom script is JavaScript code — execute it (env vars available as `env` object)
     try {
       const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
-      const fn = new AsyncFunction('inputData', 'config', 'fetch', 'llm', 'userId', node.custom_script);
-      const result = await fn(inputData, config, globalThis.fetch, llm, userId);
+      const fn = new AsyncFunction('inputData', 'config', 'env', 'fetch', 'llm', 'userId', node.custom_script);
+      const result = await fn(inputData, config, env, globalThis.fetch, llm, userId);
       // Normalize the return value
       if (result && typeof result === 'object' && result.outputs) return result;
       return { result: String(result || ''), outputs: { default: String(result || '') } };

@@ -763,6 +763,25 @@ body {
 .expand-plan-section strong { color: var(--text); margin-right: 4px; }
 .expand-knowledge { margin-top: 12px; }
 
+/* ========== ENV VARS EDITOR ========== */
+.nd-env-vars { display: flex; flex-direction: column; gap: 6px; }
+.env-var-row {
+  display: flex; align-items: center; gap: 4px;
+  background: var(--bg); padding: 4px 6px; border-radius: 6px;
+  border: 1px solid var(--border);
+}
+.env-var-row .env-key {
+  width: 110px; min-width: 80px; font-family: 'JetBrains Mono', monospace;
+  font-size: 12px; padding: 4px 6px; text-transform: uppercase;
+  background: rgba(0,240,255,0.05); border-color: rgba(0,240,255,0.15);
+}
+.env-var-row .env-val {
+  flex: 1; font-family: 'JetBrains Mono', monospace;
+  font-size: 12px; padding: 4px 6px;
+}
+.env-var-row .env-toggle { padding: 2px 6px; font-size: 11px; min-width: 28px; }
+.env-var-row .env-del { padding: 2px 6px; font-size: 13px; min-width: 24px; }
+
 /* ========== RESPONSIVE ========== */
 @media (max-width: 768px) {
   .sidebar { width: 56px; padding: 8px 4px; }

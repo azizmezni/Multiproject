@@ -207,7 +207,11 @@ export function createDashboard(port = 9999) {
     const nodeId = parseInt(req.params.id);
     if (req.body.inputs) workflows.setNodeInputs(nodeId, req.body.inputs);
     if (req.body.outputs) workflows.setNodeOutputs(nodeId, req.body.outputs);
-    if (req.body.config) workflows.setNodeConfig(nodeId, req.body.config);
+    if (req.body.config) {
+      // Merge new config into existing (so env vars don't wipe other config)
+      const existing = workflows.getNode(nodeId)?._config || {};
+      workflows.setNodeConfig(nodeId, { ...existing, ...req.body.config });
+    }
     if (req.body.name || req.body.description) {
       workflows.updateNode(nodeId, {
         ...(req.body.name && { name: req.body.name }),
