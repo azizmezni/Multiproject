@@ -77,7 +77,8 @@ export function createBot(token) {
       `/wfconnect <from> <to> \u2014 Connect nodes\n` +
       `/wfinput <id>|<names> \u2014 Set node inputs\n` +
       `/wfoutput <id>|<names> \u2014 Set node outputs\n` +
-      `/wfview \u2014 View workflow | /wfrun \u2014 Execute\n\n` +
+      `/wfview \u2014 View workflow | /wfrun \u2014 Execute\n` +
+      `/wffix [problem] \u2014 Auto-fix workflow nodes\n\n` +
       `*Chat & Providers:*\n` +
       `/chat \u2014 New session | /sessions \u2014 List\n` +
       `/providers \u2014 Manage LLMs | /setkey <prov> <key>\n` +
@@ -214,7 +215,8 @@ Only return the JSON array, no markdown fences.`
       '/wfnode <name> | <type> | <desc> \u2014 Add node to active workflow\n' +
       '/wfconnect <from_id> <to_id> \u2014 Connect two nodes\n' +
       '/wfview \u2014 View active workflow\n' +
-      '/wfrun \u2014 Execute workflow\n\n' +
+      '/wfrun \u2014 Execute workflow\n' +
+      '/wffix [problem] \u2014 Auto-fix failing nodes\n\n' +
       `*Node Types:* ${Object.entries(NODE_TYPES).map(([k, v]) => `${v.emoji} ${k}`).join(', ')}`,
       { parse_mode: 'Markdown' }
     );
@@ -332,6 +334,16 @@ Only return the JSON array, no markdown fences.`
     } catch (err) {
       await ctx.reply(`\u274c Workflow error: ${err.message}`);
     }
+  });
+
+  // /wffix [problem description] — auto-fix workflow nodes
+  bot.command('wffix', async (ctx) => {
+    const userId = ctx.from.id;
+    const wfId = getActiveWorkflow(userId);
+    if (!wfId) return ctx.reply('No active workflow. Use /wflist first.');
+
+    const problem = ctx.message.text.replace('/wffix', '').trim();
+    await runAutoFix(ctx, userId, wfId, problem || null);
   });
 
   bot.command('wfinput', async (ctx) => {
@@ -1035,6 +1047,44 @@ Return ONLY the JSON array. No markdown, no extra text, no code fences.` },
     await ctx.editMessageText('\u2705 Workflow deleted.');
   });
 
+  // --- Auto Fix from button ---
+  bot.action(/wf_fix:(\d+)/, async (ctx) => {
+    await ctx.answerCbQuery();
+    const wfId = parseInt(ctx.match[1]);
+    const buttons = [
+      [{ text: '⚡ Fix All Now', callback_data: `wf_fixnow:${wfId}` }],
+      [{ text: '✏️ Describe the problem first', callback_data: `wf_fix_describe:${wfId}` }],
+      [{ text: '◀️ Back', callback_data: `wf_view:${wfId}` }],
+    ];
+    await ctx.editMessageText(
+      '🔧 *Auto-Fix Workflow*\n\n' +
+      'I will test each node in order, and if it fails, I will ask the LLM to fix the script and re-test (up to 3 retries per node).\n\n' +
+      'You can also describe the problem so I can give the LLM more context.',
+      { parse_mode: 'Markdown', reply_markup: { inline_keyboard: buttons } }
+    );
+  });
+
+  bot.action(/wf_fixnow:(\d+)/, async (ctx) => {
+    await ctx.answerCbQuery();
+    const wfId = parseInt(ctx.match[1]);
+    await runAutoFix(ctx, ctx.from.id, wfId, null);
+  });
+
+  bot.action(/wf_fix_describe:(\d+)/, async (ctx) => {
+    await ctx.answerCbQuery();
+    const wfId = parseInt(ctx.match[1]);
+    userState.setAwaiting(ctx.from.id, `wf_fix_msg:${wfId}`);
+    await ctx.editMessageText(
+      '✏️ *Describe the problem*\n\n' +
+      'Type what\'s wrong or what you want fixed. For example:\n' +
+      '• "The API node returns 401, need to add auth header"\n' +
+      '• "Node 3 crashes on empty input"\n' +
+      '• "The output format should be CSV not JSON"\n\n' +
+      'Your message will be passed to the LLM as context for fixing.',
+      { parse_mode: 'Markdown' }
+    );
+  });
+
   bot.action(/wf_edit_io:(\d+):(.+)/, async (ctx) => {
     await ctx.answerCbQuery();
     const nodeId = parseInt(ctx.match[1]);
@@ -1107,6 +1157,14 @@ Return ONLY the JSON array. No markdown, no extra text, no code fences.` },
       } catch (err) {
         await ctx.reply(`\u274c Error: ${err.message}`);
       }
+      return;
+    }
+
+    // Handle auto-fix with user problem description
+    if (state.awaiting_input?.startsWith('wf_fix_msg:')) {
+      const wfId = parseInt(state.awaiting_input.split(':')[1]);
+      userState.clearAwaiting(userId);
+      await runAutoFix(ctx, userId, wfId, text);
       return;
     }
 
@@ -1417,6 +1475,171 @@ ${task.tools_needed ? `Tools: ${task.tools_needed}` : ''}`
     return state?.active_workflow_id || null;
   }
 
+  // --- Auto-Fix: test each node, send errors to LLM, apply fix, retry ---
+  async function runAutoFix(ctx, userId, wfId, problemDescription) {
+    const wf = workflows.get(wfId);
+    if (!wf) return ctx.reply('Workflow not found.');
+
+    let orderedNodes;
+    try {
+      orderedNodes = workflows.getExecutionOrder(wfId);
+    } catch (err) {
+      return ctx.reply(`❌ ${err.message}`);
+    }
+    if (orderedNodes.length === 0) return ctx.reply('Workflow has no nodes.');
+
+    const edges = workflows.getEdges(wfId);
+
+    await ctx.reply(
+      `🔧 *Auto-Fix: ${wf.title}*\n` +
+      `Nodes: ${orderedNodes.length}\n` +
+      (problemDescription ? `Problem: _${problemDescription}_\n` : '') +
+      `\nTesting each node in order...`,
+      { parse_mode: 'Markdown' }
+    );
+
+    const nodeResults = new Map(); // nodeId -> test result output
+    let passed = 0, autoFixed = 0, failed = 0;
+
+    for (const node of orderedNodes) {
+      const type = NODE_TYPES[node.node_type] || NODE_TYPES.process;
+      const label = `${type.emoji} *${node.name}*`;
+
+      // Build input from upstream results
+      const incomingEdges = edges.filter(e => e.to_node_id === node.id);
+      const testInput = {};
+      for (const e of incomingEdges) {
+        const upstreamResult = nodeResults.get(e.from_node_id);
+        if (upstreamResult) {
+          testInput[e.to_input] = upstreamResult.outputs?.[e.from_output] || upstreamResult.result || '';
+        }
+      }
+
+      await ctx.reply(`⏳ Testing ${label}...`, { parse_mode: 'Markdown' });
+
+      let testResult;
+      try {
+        testResult = await workflows.testNode(userId, node.id, testInput);
+      } catch (err) {
+        testResult = { ok: false, error: err.message, output: null };
+      }
+
+      // Check if test passed
+      const hasError = !testResult.ok ||
+        (testResult.output?.result && /error|fail|exception|crash|cannot|undefined/i.test(testResult.output?.result));
+
+      if (!hasError) {
+        // Node passed
+        nodeResults.set(node.id, testResult.output || { result: '', outputs: {} });
+        passed++;
+        await ctx.reply(`✅ ${label} — passed (${testResult.duration}ms)`, { parse_mode: 'Markdown' });
+        continue;
+      }
+
+      // Node failed — try to auto-fix
+      const errorMsg = testResult.error || testResult.output?.result || 'Unknown error';
+      await ctx.reply(`🔄 ${label} — failed, asking LLM to fix...\n\n\`${errorMsg.substring(0, 500)}\``, { parse_mode: 'Markdown' });
+
+      let fixed = false;
+      const currentScript = node.custom_script || '';
+      let scriptToFix = currentScript;
+
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        // Build chat message for LLM
+        const fixPrompt = [
+          `The node "${node.name}" (type: ${node.node_type}) failed with this error:`,
+          `\`\`\``,
+          errorMsg.substring(0, 1000),
+          `\`\`\``,
+          ``,
+          `Current script:`,
+          `\`\`\``,
+          scriptToFix || '// No script',
+          `\`\`\``,
+          ``,
+          `Test input was: ${JSON.stringify(testInput).substring(0, 500)}`,
+          problemDescription ? `\nUser says the problem is: "${problemDescription}"` : '',
+          ``,
+          `Fix the script. Return the complete corrected script wrapped in a \`\`\`fix code block.`,
+        ].join('\n');
+
+        try {
+          const chatResult = await llm.chat(userId, [
+            { role: 'system', content: `You are a code assistant fixing a workflow node script. The node "${node.name}" (${node.node_type}) does: "${node.description || 'No description'}". Return the complete fixed script in a \`\`\`fix code block.` },
+            { role: 'user', content: fixPrompt },
+          ]);
+
+          // Extract fixed script
+          let fixedScript = null;
+          const fixMatch = chatResult.text.match(/```fix\n?([\s\S]*?)```/);
+          if (fixMatch) {
+            fixedScript = fixMatch[1].trim();
+          } else {
+            const codeMatch = chatResult.text.match(/```(?:javascript|js|bash|python)?\n?([\s\S]*?)```/);
+            if (codeMatch && codeMatch[1].trim().length > 10) fixedScript = codeMatch[1].trim();
+          }
+
+          if (!fixedScript) {
+            await ctx.reply(`  ⚠️ Attempt ${attempt}/3: LLM didn't provide a fix`);
+            continue;
+          }
+
+          // Save fixed script
+          workflows.saveScript(node.id, fixedScript);
+          scriptToFix = fixedScript;
+
+          // Re-test
+          // Need to re-fetch the node to get updated custom_script
+          let retestResult;
+          try {
+            retestResult = await workflows.testNode(userId, node.id, testInput);
+          } catch (err) {
+            retestResult = { ok: false, error: err.message };
+          }
+
+          const retestError = !retestResult.ok ||
+            (retestResult.output?.result && /error|fail|exception|crash|cannot|undefined/i.test(retestResult.output?.result));
+
+          if (!retestError) {
+            // Fixed!
+            nodeResults.set(node.id, retestResult.output || { result: '', outputs: {} });
+            autoFixed++;
+            fixed = true;
+            await ctx.reply(`✅ ${label} — auto-fixed on attempt ${attempt}!`, { parse_mode: 'Markdown' });
+            break;
+          } else {
+            const retestErr = retestResult.error || retestResult.output?.result || '';
+            await ctx.reply(`  🔄 Attempt ${attempt}/3 — still failing: \`${retestErr.substring(0, 200)}\``, { parse_mode: 'Markdown' });
+          }
+        } catch (err) {
+          await ctx.reply(`  ⚠️ Attempt ${attempt}/3 LLM error: ${err.message}`);
+        }
+      }
+
+      if (!fixed) {
+        // Restore original script if all attempts failed
+        if (currentScript) workflows.saveScript(node.id, currentScript);
+        nodeResults.set(node.id, { result: '', outputs: {} });
+        failed++;
+        await ctx.reply(`❌ ${label} — could not fix after 3 attempts`, { parse_mode: 'Markdown' });
+      }
+    }
+
+    // Summary
+    const summary = [
+      `\n🏁 *Auto-Fix Complete: ${wf.title}*`,
+      ``,
+      `✅ Passed: ${passed}`,
+      autoFixed > 0 ? `🔧 Auto-fixed: ${autoFixed}` : '',
+      failed > 0 ? `❌ Failed: ${failed}` : '',
+      ``,
+      failed === 0 ? '🎉 All nodes working!' : `⚠️ ${failed} node(s) still need manual fixes.`,
+    ].filter(Boolean).join('\n');
+
+    const nodes = workflows.getNodes(wfId);
+    await ctx.reply(summary, { parse_mode: 'Markdown', ...workflowKeyboard(wfId, nodes) });
+  }
+
   function workflowKeyboard(wfId, nodes) {
     const buttons = [];
     for (const n of nodes) {
@@ -1427,6 +1650,7 @@ ${task.tools_needed ? `Tools: ${task.tools_needed}` : ''}`
     buttons.push([
       { text: '\u2795 Add Node', callback_data: `wf_addnode:${wfId}` },
       { text: '\u26a1 Run', callback_data: `wf_run:${wfId}` },
+      { text: '🔧 Fix', callback_data: `wf_fix:${wfId}` },
     ]);
     buttons.push([
       { text: '\ud83d\udd04 Refresh', callback_data: `wf_view:${wfId}` },
