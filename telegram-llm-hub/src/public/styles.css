@@ -305,6 +305,15 @@ body {
   user-select: none;
 }
 .wf-node:hover { border-color: var(--cyan); box-shadow: 0 0 20px rgba(0,240,255,0.15); }
+.wf-node-delete {
+  position: absolute; top: -8px; right: -8px;
+  width: 20px; height: 20px; border-radius: 50%;
+  background: var(--red); color: #fff; border: 2px solid var(--bg2);
+  font-size: 14px; line-height: 1; cursor: pointer;
+  display: none; align-items: center; justify-content: center;
+  z-index: 10; padding: 0;
+}
+.wf-node:hover .wf-node-delete { display: flex; }
 .wf-node.running { border-color: var(--orange); animation: nodePulse 1.5s infinite; }
 .wf-node.done { border-color: var(--green); }
 .wf-node.error { border-color: var(--red); }
@@ -589,8 +598,23 @@ body {
   background: var(--bg);
 }
 .conn-item strong { color: var(--text); }
+.conn-item .btn { vertical-align: middle; }
 .conn-in { border-left: 2px solid var(--green); }
 .conn-out { border-left: 2px solid var(--purple); }
+
+/* ========== UPSTREAM PREVIEW ========== */
+.nd-upstream-preview {
+  margin-top: 12px;
+  padding: 10px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  border-left: 3px solid var(--green);
+}
+.nd-upstream-preview pre {
+  font-size: 11px !important;
+  background: var(--bg2) !important;
+}
 
 /* ========== EXPAND PLANS ========== */
 .expand-plans { display: flex; flex-direction: column; gap: 12px; }

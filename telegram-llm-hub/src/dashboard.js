@@ -287,6 +287,17 @@ export function createDashboard(port = 9999) {
     res.json({ ok: true });
   });
 
+  // Get a node's last execution result
+  app.get('/api/workflows/nodes/:id/result', (req, res) => {
+    const node = workflows.getNode(parseInt(req.params.id));
+    if (!node) return res.status(404).json({ error: 'Not found' });
+    let result = null;
+    if (node.result) {
+      try { result = JSON.parse(node.result); } catch { result = node.result; }
+    }
+    res.json({ result, nodeId: node.id, name: node.name, node_type: node.node_type, status: node.status });
+  });
+
   app.delete('/api/workflows/nodes/:id', (req, res) => {
     workflows.deleteNode(parseInt(req.params.id));
     res.json({ ok: true });

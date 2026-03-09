@@ -392,6 +392,7 @@ async function viewWorkflow(wfId) {
           const statusCls = n.status === 'done' ? 'done' : n.status === 'running' ? 'running' : n.status === 'error' ? 'error' : '';
           return `<div class="wf-node ${statusCls}" id="wfnode-${n.id}" style="left:${x}px;top:${y}px"
             onmousedown="startDrag(event,${n.id})" ondblclick="nodeDetail(${n.id},${wf.id})">
+            <button class="wf-node-delete" onclick="event.stopPropagation();deleteNode(${n.id},${wf.id})" title="Delete node">×</button>
             <div class="wf-node-header"><span class="wf-node-type">${type.emoji}</span><span class="wf-node-name">${n.name}</span></div>
             <div class="wf-node-io">
               <div class="wf-ports-row">${inputs.map(inp => `<div class="wf-port input-port" data-node="${n.id}" data-port="${inp}" data-dir="in" onclick="portClick(event,${n.id},'${inp}','in',${wf.id})" title="${inp}"></div>`).join('')}</div>
@@ -519,14 +520,29 @@ async function nodeDetail(nodeId, wfId) {
   let connectionHtml = '';
   if (conns.incoming.length > 0 || conns.outgoing.length > 0) {
     const inHtml = conns.incoming.map(c =>
-      `<div class="conn-item conn-in">⬅️ <strong>${escapeHtml(c.name)}</strong> <span class="badge badge-blue" style="font-size:10px">${c.type}</span> <span style="color:var(--text2);font-size:11px">${c.fromOutput} → ${c.toInput}</span>${c.hasResult ? ' <span class="badge badge-green" style="font-size:9px">has data</span>' : ''}</div>`
+      `<div class="conn-item conn-in">⬅️ <strong>${escapeHtml(c.name)}</strong> <span class="badge badge-blue" style="font-size:10px">${c.type}</span> <span style="color:var(--text2);font-size:11px">${c.fromOutput} → ${c.toInput}</span>${c.hasResult ? ' <span class="badge badge-green" style="font-size:9px">has data</span>' : ''}
+        ${c.hasResult ? `<button class="btn btn-sm" style="font-size:10px;padding:1px 6px;margin-left:4px" onclick="viewUpstreamOutput(${c.nodeId},'${escapeAttr(c.name)}')">👁️ View</button>` : ''}</div>`
     ).join('');
     const outHtml = conns.outgoing.map(c =>
       `<div class="conn-item conn-out">➡️ <strong>${escapeHtml(c.name)}</strong> <span class="badge badge-purple" style="font-size:10px">${c.type}</span> <span style="color:var(--text2);font-size:11px">${c.fromOutput} → ${c.toInput}</span></div>`
     ).join('');
     connectionHtml = `<div class="nd-connections">
-      <div class="nd-section-title" style="font-size:12px;margin-bottom:6px">🔗 Connections</div>
+      <div class="nd-section-title" style="font-size:12px;margin-bottom:6px">🔗 Connections
+        ${conns.incoming.some(c => c.hasResult) ? `<button class="btn btn-sm" style="font-size:10px;margin-left:auto;padding:2px 8px" onclick="fetchUpstreamOutputs(${nodeId})">📥 Get All Upstream</button>` : ''}
+      </div>
       ${inHtml}${outHtml}
+    </div>`;
+  }
+
+  // Build upstream output preview if available
+  let upstreamPreviewHtml = '';
+  if (Object.keys(scriptData.connectedInputs).length > 0) {
+    const preview = JSON.stringify(scriptData.connectedInputs, null, 2);
+    upstreamPreviewHtml = `<div class="nd-upstream-preview">
+      <div class="nd-section-title" style="font-size:12px;margin-bottom:6px">📊 Upstream Output Structure
+        <button class="btn btn-sm" style="font-size:10px;margin-left:auto;padding:2px 8px" onclick="useUpstreamAsTestInput()">↓ Use as Test Input</button>
+      </div>
+      <pre class="nd-result-pre" style="max-height:150px;overflow-y:auto;font-size:11px">${escapeHtml(preview.substring(0, 2000))}</pre>
     </div>`;
   }
 
@@ -572,6 +588,8 @@ async function nodeDetail(nodeId, wfId) {
           </div>
         </div>
         <textarea class="textarea code-textarea" id="nd-script-editor" rows="8">${escapeHtml(codeContent)}</textarea>
+
+        ${upstreamPreviewHtml}
 
         <!-- Test Panel -->
         <div class="nd-section-title" style="margin-top:16px">
@@ -619,6 +637,72 @@ async function saveNodeScript(nodeId) {
   await PUT(`/workflows/nodes/${nodeId}/script`, { script: script || null });
   showToast('💾', 'Script saved!');
   await refreshAll();
+}
+
+// View a single upstream node's output
+async function viewUpstreamOutput(upstreamNodeId, nodeName) {
+  try {
+    const data = await GET(`/workflows/nodes/${upstreamNodeId}/result`);
+    const content = data.result ? JSON.stringify(data.result, null, 2) : 'No result available';
+    showModal(`📊 Output from: ${nodeName}`, `
+      <pre class="nd-result-pre" style="max-height:400px;overflow-y:auto;font-size:12px;background:var(--bg);padding:12px;border-radius:8px">${escapeHtml(content.substring(0, 5000))}</pre>
+      <div class="btn-group" style="margin-top:12px">
+        <button class="btn btn-sm btn-primary" onclick="copyUpstreamToTestInput('${escapeAttr(content.substring(0, 3000))}')">↓ Use as Test Input</button>
+        <button class="btn btn-sm" onclick="copyToClipboard(\`${escapeAttr(content.substring(0, 5000))}\`)">📋 Copy</button>
+        <button class="btn btn-sm" onclick="closeModal()">Close</button>
+      </div>
+    `);
+  } catch (err) {
+    showToast('❌', `Failed to get output: ${err.message}`);
+  }
+}
+
+// Fetch all upstream outputs and show in the test input
+async function fetchUpstreamOutputs(nodeId) {
+  try {
+    const scriptData = await GET(`/workflows/nodes/${nodeId}/script`);
+    const inputs = scriptData.connectedInputs || {};
+    if (Object.keys(inputs).length === 0) {
+      showToast('⚠️', 'No upstream data available. Run upstream nodes first.');
+      return;
+    }
+    const testInputEl = document.getElementById('nd-test-input');
+    if (testInputEl) {
+      testInputEl.value = JSON.stringify(inputs, null, 2);
+      showToast('📥', 'Upstream outputs loaded into test input!');
+    }
+  } catch (err) {
+    showToast('❌', `Failed to fetch: ${err.message}`);
+  }
+}
+
+// Copy upstream preview to test input field
+function useUpstreamAsTestInput() {
+  const preview = document.querySelector('.nd-upstream-preview pre');
+  const testInput = document.getElementById('nd-test-input');
+  if (preview && testInput) {
+    testInput.value = preview.textContent;
+    showToast('📥', 'Upstream data copied to test input!');
+  }
+}
+
+function copyUpstreamToTestInput(data) {
+  closeModal();
+  const testInput = document.getElementById('nd-test-input');
+  if (testInput) {
+    try {
+      // Try to wrap in the proper input format
+      const parsed = JSON.parse(data);
+      testInput.value = JSON.stringify({ default: parsed }, null, 2);
+    } catch {
+      testInput.value = JSON.stringify({ default: data }, null, 2);
+    }
+    showToast('📥', 'Output copied to test input!');
+  }
+}
+
+function copyToClipboard(text) {
+  navigator.clipboard.writeText(text).then(() => showToast('📋', 'Copied!')).catch(() => showToast('❌', 'Copy failed'));
 }
 
 async function testNodeRun(nodeId) {
