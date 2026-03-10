@@ -71,10 +71,12 @@ export const workflows = {
   },
 
   updateNode(nodeId, updates) {
+    const VALID_COLUMNS = new Set(['name', 'description', 'node_type', 'inputs', 'outputs', 'config', 'position', 'status', 'result', 'custom_script']);
     const sets = [];
     const vals = [];
     for (const [key, val] of Object.entries(updates)) {
       if (key.startsWith('_')) continue; // skip parsed fields
+      if (!VALID_COLUMNS.has(key)) continue; // prevent SQL injection via column names
       sets.push(`${key} = ?`);
       vals.push(typeof val === 'object' ? JSON.stringify(val) : val);
     }
@@ -225,7 +227,7 @@ export const workflows = {
       throw new Error('Workflow has circular dependencies!');
     }
 
-    return order.map(id => nodes.find(n => n.id === id));
+    return order.map(id => nodes.find(n => n.id === id)).filter(Boolean);
   },
 
   // --- Execute workflow ---
@@ -237,14 +239,24 @@ export const workflows = {
     const orderedNodes = this.getExecutionOrder(workflowId);
     const edges = this.getEdges(workflowId);
     const nodeResults = new Map(); // nodeId -> { outputs: { outputName: value } }
+    const failedNodeIds = new Set(); // track failed nodes to skip dependents
 
     for (const node of orderedNodes) {
+      // Skip nodes that depend on a failed upstream node
+      const incomingEdges = edges.filter(e => e.to_node_id === node.id);
+      const dependsOnFailed = incomingEdges.some(e => failedNodeIds.has(e.from_node_id));
+      if (dependsOnFailed) {
+        failedNodeIds.add(node.id);
+        this.updateNode(node.id, { status: 'error', result: JSON.stringify({ error: 'Skipped: upstream node failed' }) });
+        if (onProgress) await onProgress(node, 'error', { error: 'Skipped: upstream node failed' });
+        continue;
+      }
+
       this.updateNode(node.id, { status: 'running' });
       if (onProgress) await onProgress(node, 'running');
 
       try {
         // Gather inputs from connected nodes
-        const incomingEdges = edges.filter(e => e.to_node_id === node.id);
         const inputData = {};
         for (const e of incomingEdges) {
           const sourceResult = nodeResults.get(e.from_node_id);
@@ -260,9 +272,9 @@ export const workflows = {
         this.updateNode(node.id, { status: 'done', result: JSON.stringify(result) });
         if (onProgress) await onProgress(node, 'done', result);
       } catch (err) {
+        failedNodeIds.add(node.id);
         this.updateNode(node.id, { status: 'error', result: JSON.stringify({ error: err.message }) });
         if (onProgress) await onProgress(node, 'error', { error: err.message });
-        // Continue with other nodes that don't depend on this one
       }
     }
 
@@ -303,7 +315,8 @@ export const workflows = {
         if (node && ['code', 'file', 'output'].includes(node.node_type) && result.result) {
           const safeNodeName = nodeName.replace(/[^a-zA-Z0-9_\-]/g, '_');
           const ext = node.node_type === 'code' ? (result.outputs?.filename ? '' : '.txt') : '.txt';
-          const fileName = result.outputs?.filename || `${safeNodeName}${ext}`;
+          const rawFileName = result.outputs?.filename || `${safeNodeName}${ext}`;
+          const fileName = pathMod.basename(rawFileName); // prevent path traversal
           await fs.writeFile(pathMod.join(outputDir, fileName), result.result, 'utf-8');
         }
       }
@@ -463,9 +476,10 @@ Return ONLY "true" or "false".`;
     if (isPromptType) {
       // Custom script is an LLM prompt — fill in inputData and env var placeholders
       let prompt = node.custom_script.replace(/\{\{inputData\}\}/g, JSON.stringify(inputData));
-      // Replace {{ENV_VAR_NAME}} with values from env
+      // Replace {{ENV_VAR_NAME}} with values from env (escape key for regex, use fn for $ safety)
       for (const [key, val] of Object.entries(env)) {
-        prompt = prompt.replace(new RegExp(`\\{\\{${key}\\}\\}`, 'g'), val);
+        const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        prompt = prompt.replace(new RegExp(`\\{\\{${escaped}\\}\\}`, 'g'), () => val);
       }
       const result = await llm.chat(userId, [
         { role: 'system', content: 'Follow the instructions precisely.' },
@@ -569,13 +583,16 @@ Return ONLY "true" or "false".`;
           config,
         };
 
-      case 'api':
+      case 'api': {
+        let parsedHeaders = {};
+        try { if (config.headers) parsedHeaders = JSON.parse(config.headers); } catch {}
         return {
           language: 'javascript',
-          script: `// API NODE: ${node.name}\n// HTTP request\n\nconst url = ${JSON.stringify(config.url || '')} || inputData.url || "";\nconst method = ${JSON.stringify(config.method || 'GET')};\n\nconst res = await fetch(url, {\n  method,\n  headers: ${JSON.stringify(config.headers ? JSON.parse(config.headers) : {}, null, 2)},\n  ${config.method !== 'GET' ? `body: ${JSON.stringify(config.body || '')} || inputData.default` : '// GET request - no body'}\n});\n\nconst text = await res.text();\nreturn { result: text, outputs: { default: text, status: res.status } };`,
+          script: `// API NODE: ${node.name}\n// HTTP request\n\nconst url = ${JSON.stringify(config.url || '')} || inputData.url || "";\nconst method = ${JSON.stringify(config.method || 'GET')};\n\nconst res = await fetch(url, {\n  method,\n  headers: ${JSON.stringify(parsedHeaders, null, 2)},\n  ${config.method !== 'GET' ? `body: ${JSON.stringify(config.body || '')} || inputData.default` : '// GET request - no body'}\n});\n\nconst text = await res.text();\nreturn { result: text, outputs: { default: text, status: res.status } };`,
           prompt: null,
           config,
         };
+      }
 
       case 'file':
         return {

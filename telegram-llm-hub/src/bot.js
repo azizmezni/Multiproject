@@ -4,7 +4,6 @@ import { llm } from './llm-manager.js';
 import { sessions, userState } from './sessions.js';
 import { boards } from './boards.js';
 import { drafts, extractUrl, fetchLinkMeta, detectLinkType } from './drafts.js';
-import { settings } from './settings.js';
 import { qa } from './qa.js';
 import { kb } from './keyboards.js';
 import { PROVIDER_REGISTRY } from './providers.js';
@@ -31,9 +30,13 @@ async function safeSend(ctx, text, extra = {}) {
     // Markdown failed — send as plain text (strip all formatting)
     try {
       return await ctx.reply(stripMd(text), extra);
-    } catch {
+    } catch (err) {
       // Even plain text failed (maybe too long) — truncate hard
-      return await ctx.reply(stripMd(text).substring(0, 4000), extra);
+      try {
+        return await ctx.reply(stripMd(text).substring(0, 4000), extra);
+      } catch (finalErr) {
+        console.error('safeSend failed completely:', finalErr.message);
+      }
     }
   }
 }
@@ -910,12 +913,34 @@ Return ONLY the JSON array. No markdown, no extra text, no code fences.` },
 
   bot.action(/draft_plan:(\d+)/, async (ctx) => {
     await ctx.answerCbQuery();
-    const draft = drafts.get(parseInt(ctx.match[1]));
+    const draftId = parseInt(ctx.match[1]);
+    const draft = drafts.get(draftId);
     if (!draft) return;
-    // Reuse the /new flow
-    const fakeCtx = { ...ctx, message: { text: `/new ${draft.title || 'Draft Project'}` }, from: ctx.from };
-    userState.setAwaiting(ctx.from.id, `draft_plan:${draft.id}`);
-    await ctx.editMessageText(`\ud83d\udcdd Planning project from draft: *${draft.title}*\n\nUse /new ${draft.title} to create the board.`, { parse_mode: 'Markdown' });
+
+    const userId = ctx.from.id;
+    llm.initDefaults(userId);
+    await ctx.editMessageText(`\ud83d\udcdd Planning project from: *${stripMd(draft.title || 'Draft')}*...`, { parse_mode: 'Markdown' });
+
+    try {
+      const result = await llm.chat(userId, [
+        { role: 'system', content: 'You are a project planner. Return a JSON array of tasks: [{"title":"...","description":"...","requires_input":false,"input_question":null,"tools_needed":[]}]. Only JSON.' },
+        { role: 'user', content: `Create a project plan for: ${draft.title}\n\nContext: ${(draft.description || draft.content || '').substring(0, 1500)}` },
+      ]);
+
+      let taskList;
+      try { taskList = JSON.parse(result.text.replace(/```json?\n?/g, '').replace(/```/g, '').trim()); }
+      catch { taskList = [{ title: 'Review requirements', description: result.text }]; }
+
+      const board = boards.create(userId, draft.title || 'Draft Project');
+      boards.addTasksFromPlan(board.id, taskList);
+      drafts.updateStatus(draftId, 'processed');
+      userState.setActiveBoard(userId, board.id);
+
+      const tasks = boards.getTasks(board.id);
+      await ctx.reply(`\u2705 Board created: ${stripMd(draft.title)}\n${tasks.length} tasks generated!`, kb.boardView(board.id, tasks, 'planning'));
+    } catch (err) {
+      await ctx.reply(`\u274c Error creating plan: ${err.message}`);
+    }
   });
 
   bot.action(/draft_cli:(\d+)/, async (ctx) => {
@@ -950,8 +975,9 @@ Return ONLY the JSON array. No markdown, no extra text, no code fences.` },
     await ctx.editMessageText(`📥 *Cloning:* \`${repoName}\`...`, { parse_mode: 'Markdown' });
 
     try {
-      // Clone the repo
-      const cloneResult = await qa.runCommand(`git clone ${cloneUrl}`, process.cwd(), 60000);
+      // Clone the repo (quote URL to prevent shell injection)
+      const safeUrl = cloneUrl.replace(/[;&|`$"]/g, '');
+      const cloneResult = await qa.runCommand(`git clone "${safeUrl}"`, process.cwd(), 60000);
       if (!cloneResult.ok) {
         return safeSend(ctx, `❌ Clone failed:\n\`${cloneResult.stderr.substring(0, 500)}\``);
       }
@@ -1048,8 +1074,9 @@ Return ONLY the JSON array. No markdown, no extra text, no code fences.` },
       const path = await import('path');
       const repoDir = path.join(process.cwd(), repoName);
 
-      // Clone
-      const cloneResult = await qa.runCommand(`git clone ${cloneUrl}`, process.cwd(), 60000);
+      // Clone (quote URL to prevent shell injection)
+      const safeUrl = cloneUrl.replace(/[;&|`$"]/g, '');
+      const cloneResult = await qa.runCommand(`git clone "${safeUrl}"`, process.cwd(), 60000);
       if (!cloneResult.ok && !cloneResult.stderr?.includes('already exists')) {
         return safeSend(ctx, `❌ Clone failed:\n\`${cloneResult.stderr?.substring(0, 500)}\``);
       }

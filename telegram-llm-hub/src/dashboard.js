@@ -1,7 +1,7 @@
 import express from 'express';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
-import { readdir, readFile, stat } from 'fs/promises';
+import { readdir, readFile, stat, writeFile as fsWriteFile, mkdir as fsMkdir } from 'fs/promises';
 import { spawn } from 'child_process';
 import http from 'http';
 import db from './db.js';
@@ -19,32 +19,46 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 // --- Exported project management ---
 const runningProjects = new Map(); // name -> { process, port, logs }
 let nextProjectPort = 10001;
+const freedPorts = []; // reclaim ports from stopped projects
+
+// Cleanup child processes on shutdown
+function cleanupProjects() {
+  for (const [name, project] of runningProjects) {
+    try { project.process.kill(); } catch {}
+  }
+  runningProjects.clear();
+}
+process.on('exit', cleanupProjects);
+process.on('SIGINT', () => { cleanupProjects(); process.exit(0); });
+process.on('SIGTERM', () => { cleanupProjects(); process.exit(0); });
 
 export function createDashboard(port = 9999) {
   const app = express();
-  app.use(express.json());
 
-  // --- Subdomain proxy: projectname.localhost:PORT → project's internal port ---
+  // --- Subdomain proxy MUST be before express.json() so body stream is intact ---
   app.use((req, res, next) => {
     const host = req.hostname || '';
-    // Check for subdomain: name.localhost
     const parts = host.split('.');
     if (parts.length >= 2 && parts[parts.length - 1] === 'localhost') {
       const subdomain = parts.slice(0, -1).join('.').toLowerCase();
       if (subdomain && subdomain !== 'localhost') {
         const project = runningProjects.get(subdomain);
         if (project) {
-          // Proxy to the project's port
           const proxyReq = http.request({
             hostname: '127.0.0.1', port: project.port,
             path: req.originalUrl, method: req.method,
             headers: { ...req.headers, host: `localhost:${project.port}` },
           }, (proxyRes) => {
+            proxyRes.on('error', () => {
+              if (!res.headersSent) res.status(502).json({ error: 'Proxy response error' });
+            });
             res.writeHead(proxyRes.statusCode, proxyRes.headers);
             proxyRes.pipe(res);
           });
           proxyReq.on('error', () => {
-            res.status(502).json({ error: `Project "${subdomain}" is not responding on port ${project.port}` });
+            if (!res.headersSent) {
+              res.status(502).json({ error: `Project "${subdomain}" is not responding on port ${project.port}` });
+            }
           });
           if (req.method !== 'GET' && req.method !== 'HEAD') {
             req.pipe(proxyReq);
@@ -53,13 +67,13 @@ export function createDashboard(port = 9999) {
           }
           return;
         }
-        // No running project with that name — show helpful error
         return res.status(404).json({ error: `Project "${subdomain}" is not running. Start it from the Projects tab.` });
       }
     }
     next();
   });
 
+  app.use(express.json());
   app.use(express.static(join(__dirname, 'public')));
 
   // Resolve userId: use query param or first known user, or default 1
@@ -448,16 +462,14 @@ Help the user test, debug, and fix this script. When suggesting code changes, wr
       return res.json({ data, filename: `${safeName}.json` });
     }
 
-    const fs = await import('fs/promises');
-    const pathMod = await import('path');
-    const exportDir = pathMod.join(process.cwd(), 'output', safeName, `export-${format}`);
-    await fs.mkdir(exportDir, { recursive: true });
+    const exportDir = join(process.cwd(), 'output', safeName, `export-${format}`);
+    await fsMkdir(exportDir, { recursive: true });
     const files = [];
 
-    async function writeFile(name, content) {
-      const dir = pathMod.dirname(pathMod.join(exportDir, name));
-      await fs.mkdir(dir, { recursive: true });
-      await fs.writeFile(pathMod.join(exportDir, name), content, 'utf-8');
+    async function writeExportFile(name, content) {
+      const dir = dirname(join(exportDir, name));
+      await fsMkdir(dir, { recursive: true });
+      await fsWriteFile(join(exportDir, name), content, 'utf-8');
       files.push(name);
     }
 
@@ -484,7 +496,7 @@ Help the user test, debug, and fix this script. When suggesting code changes, wr
     const pkgDeps = {};
     if (format === 'api' || format === 'docker') pkgDeps.express = '^4.18.2';
 
-    await writeFile('package.json', JSON.stringify({
+    await writeExportFile('package.json', JSON.stringify({
       name: safeName.toLowerCase().replace(/[^a-z0-9_-]/g, '-'),
       version: '1.0.0',
       type: 'module',
@@ -497,7 +509,7 @@ Help the user test, debug, and fix this script. When suggesting code changes, wr
     // Write individual node scripts
     for (const [nodeId, ns] of Object.entries(nodeScripts)) {
       if (ns.isPrompt) {
-        await writeFile(ns.filename, [
+        await writeExportFile(ns.filename, [
           `// LLM Prompt Node: ${ns.name}`,
           `// Type: ${ns.type}`,
           `// This node requires an LLM provider\n`,
@@ -511,7 +523,7 @@ Help the user test, debug, and fix this script. When suggesting code changes, wr
         ].join('\n'));
       } else {
         const body = ns.raw ? ns.raw.split('\n').map(l => '  ' + l).join('\n') : '  return { result: inputData.default || "", outputs: { default: inputData.default || "" } };';
-        await writeFile(ns.filename, [
+        await writeExportFile(ns.filename, [
           `// Node: ${ns.name}`,
           `// Type: ${ns.type}\n`,
           `export default async function execute(inputData, config) {`,
@@ -522,7 +534,7 @@ Help the user test, debug, and fix this script. When suggesting code changes, wr
     }
 
     // Workflow definition
-    await writeFile('workflow.json', JSON.stringify({ workflow: wf, nodes, edges }, null, 2));
+    await writeExportFile('workflow.json', JSON.stringify({ workflow: wf, nodes, edges }, null, 2));
 
     // ---- Runner (index.js) ----
     const imports = orderedNodes.map((n, i) => `import node${i} from './${nodeScripts[n.id].filename}';`).join('\n');
@@ -563,7 +575,7 @@ export async function runWorkflow(initialInput = {}) {
 // CLI entry
 runWorkflow({ default: process.argv[2] || '' }).catch(console.error);
 `;
-    await writeFile('index.js', runner);
+    await writeExportFile('index.js', runner);
 
     // ---- API Server (for api and docker) ----
     if (format === 'api' || format === 'docker') {
@@ -604,12 +616,12 @@ app.post('/run', async (req, res) => {
 app.get('/health', (req, res) => res.json({ status: 'ok', workflow: ${JSON.stringify(wf.title)} }));
 app.listen(PORT, () => console.log(\`🌐 Workflow API on port \${PORT}\`));
 `;
-      await writeFile('server.js', server);
+      await writeExportFile('server.js', server);
     }
 
     // ---- Docker files ----
     if (format === 'docker') {
-      await writeFile('Dockerfile', `FROM node:20-alpine
+      await writeExportFile('Dockerfile', `FROM node:20-alpine
 WORKDIR /app
 COPY package*.json ./
 RUN npm install --production
@@ -617,7 +629,7 @@ COPY . .
 EXPOSE 3000
 CMD ["node", "server.js"]
 `);
-      await writeFile('docker-compose.yml', `version: '3.8'
+      await writeExportFile('docker-compose.yml', `version: '3.8'
 services:
   workflow:
     build: .
@@ -627,7 +639,7 @@ services:
       - NODE_ENV=production
     restart: unless-stopped
 `);
-      await writeFile('.dockerignore', `node_modules
+      await writeExportFile('.dockerignore', `node_modules
 .env
 *.db
 `);
@@ -781,8 +793,13 @@ After the JSON array, add a markdown section starting with "---\\n**Knowledge & 
 
   // ==================== CLI ====================
   app.post('/api/run', async (req, res) => {
-    const result = await qa.runCommand(req.body.command, req.body.cwd);
-    res.json(result);
+    try {
+      if (!req.body.command) return res.status(400).json({ error: 'Command required' });
+      const result = await qa.runCommand(req.body.command, req.body.cwd);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
   });
 
   // ==================== PROJECTS (Exported) ====================
@@ -867,10 +884,13 @@ After the JSON array, add a markdown section starting with "---\\n**Knowledge & 
     try {
       await stat(join(runDir, 'node_modules'));
     } catch {
-      await qa.runCommand('npm install', runDir, 60000);
+      const installResult = await qa.runCommand('npm install', runDir, 60000);
+      if (!installResult.ok) {
+        return res.status(500).json({ error: `npm install failed: ${(installResult.stderr || '').substring(0, 500)}` });
+      }
     }
 
-    const port = nextProjectPort++;
+    const port = freedPorts.pop() || nextProjectPort++;
     const logBuffer = [];
 
     try {
@@ -911,6 +931,7 @@ After the JSON array, add a markdown section starting with "---\\n**Knowledge & 
 
     try {
       project.process.kill();
+      freedPorts.push(project.port);
       runningProjects.delete(name);
       res.json({ ok: true });
     } catch (err) {
@@ -926,8 +947,11 @@ After the JSON array, add a markdown section starting with "---\\n**Knowledge & 
     res.json({ logs: project.logs.join('') });
   });
 
-  // SPA fallback
+  // SPA fallback — don't catch API routes
   app.get('*', (req, res) => {
+    if (req.path.startsWith('/api/')) {
+      return res.status(404).json({ error: 'Not found' });
+    }
     res.sendFile(join(__dirname, 'public', 'index.html'));
   });
 

@@ -15,11 +15,16 @@ let state = {
 // ===================== API HELPERS =====================
 async function api(path, opts = {}) {
   const res = await fetch(`/api${path}`, {
-    headers: { 'Content-Type': 'application/json' },
     ...opts,
+    headers: { 'Content-Type': 'application/json', ...opts.headers },
     body: opts.body ? JSON.stringify(opts.body) : undefined,
   });
-  const data = await res.json();
+  if (res.status === 204) return {};
+  let data;
+  try { data = await res.json(); } catch {
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    throw new Error('Invalid response from server');
+  }
   if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
   return data;
 }
@@ -36,19 +41,25 @@ document.addEventListener('DOMContentLoaded', async () => {
 });
 
 async function refreshAll() {
-  const [statsData, provData, boardsData, wfData, draftsData, sessData, ntData] = await Promise.all([
-    GET('/stats'), GET('/providers'), GET('/boards'),
-    GET('/workflows'), GET('/drafts'), GET('/sessions'), GET('/node-types'),
-  ]);
-  state.stats = statsData;
-  state.providers = provData.providers || [];
-  state.registry = provData.registry || [];
-  state.boards = boardsData;
-  state.workflows = wfData;
-  state.drafts = draftsData;
-  state.sessions = sessData;
-  state.nodeTypes = ntData;
-  updateHeader();
+  try {
+    const results = await Promise.allSettled([
+      GET('/stats'), GET('/providers'), GET('/boards'),
+      GET('/workflows'), GET('/drafts'), GET('/sessions'), GET('/node-types'),
+    ]);
+    const val = (i, fallback) => results[i].status === 'fulfilled' ? results[i].value : fallback;
+    state.stats = val(0, state.stats);
+    const provData = val(1, { providers: state.providers, registry: state.registry });
+    state.providers = provData.providers || [];
+    state.registry = provData.registry || [];
+    state.boards = val(2, state.boards || []);
+    state.workflows = val(3, state.workflows || []);
+    state.drafts = val(4, state.drafts || []);
+    state.sessions = val(5, state.sessions || []);
+    state.nodeTypes = val(6, state.nodeTypes || {});
+    updateHeader();
+  } catch (err) {
+    console.error('Failed to refresh app state:', err);
+  }
 }
 
 function updateHeader() {
@@ -1387,7 +1398,7 @@ function showToast(icon, text) {
   const container = document.getElementById('toast-container');
   const toast = document.createElement('div');
   toast.className = 'toast';
-  toast.innerHTML = `<span class="toast-icon">${icon}</span><span class="toast-text">${text}</span>`;
+  toast.innerHTML = `<span class="toast-icon">${icon}</span><span class="toast-text">${escapeHtml(text)}</span>`;
   container.appendChild(toast);
   setTimeout(() => toast.remove(), 4000);
 }
@@ -1401,5 +1412,5 @@ function escapeHtml(text) {
 }
 
 function escapeAttr(text) {
-  return String(text).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/'/g, '&#39;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  return String(text).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/'/g, '&#39;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/`/g, '&#96;');
 }
