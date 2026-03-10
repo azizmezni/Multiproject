@@ -13,6 +13,8 @@ import { workflows, NODE_TYPES } from './workflows.js';
 import { gamification } from './gamification.js';
 import { qa } from './qa.js';
 import { PROVIDER_REGISTRY } from './providers.js';
+import { scheduler } from './scheduler.js';
+import crypto from 'crypto';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -78,7 +80,10 @@ export function createDashboard(port = 9999) {
 
   // Resolve userId: use query param or first known user, or default 1
   function getUserId(req) {
-    if (req.query.userId) return parseInt(req.query.userId);
+    if (req.query.userId) {
+      const parsed = parseInt(req.query.userId);
+      if (!isNaN(parsed) && parsed > 0) return parsed;
+    }
     const row = db.prepare('SELECT DISTINCT user_id FROM providers LIMIT 1').get();
     return row?.user_id || 1;
   }
@@ -418,21 +423,6 @@ Help the user test, debug, and fix this script. When suggesting code changes, wr
   app.delete('/api/workflows/edges/:id', (req, res) => {
     workflows.disconnect(parseInt(req.params.id));
     res.json({ ok: true });
-  });
-
-  app.post('/api/workflows/:id/execute', async (req, res) => {
-    const userId = getUserId(req);
-    const wfId = parseInt(req.params.id);
-    try {
-      const results = await workflows.executeWorkflow(userId, wfId);
-      gamification.addXP(userId, 'workflow_run');
-      const wf = workflows.get(wfId);
-      const nodes = workflows.getNodes(wfId);
-      const edges = workflows.getEdges(wfId);
-      res.json({ ...wf, nodes, edges, results: Object.fromEntries(results) });
-    } catch (err) {
-      res.status(500).json({ error: err.message });
-    }
   });
 
   app.get('/api/node-types', (req, res) => {
@@ -895,7 +885,7 @@ After the JSON array, add a markdown section starting with "---\\n**Knowledge & 
 
     try {
       const child = spawn(runCmd, runArgs, {
-        cwd: runDir, shell: true,
+        cwd: runDir,
         env: { ...process.env, PORT: String(port) },
         stdio: ['ignore', 'pipe', 'pipe'],
       });
@@ -913,6 +903,7 @@ After the JSON array, add a markdown section starting with "---\\n**Knowledge & 
       child.on('exit', (code) => {
         logBuffer.push(`\n[Process exited with code ${code}]`);
         runningProjects.delete(name);
+        freedPorts.push(port);
       });
 
       runningProjects.set(name, { process: child, port, logs: logBuffer, dir: runDir });
@@ -947,6 +938,179 @@ After the JSON array, add a markdown section starting with "---\\n**Knowledge & 
     res.json({ logs: project.logs.join('') });
   });
 
+  // ==================== WORKFLOW WEBHOOKS ====================
+  // Generate or get webhook URL for a workflow
+  app.post('/api/workflows/:id/webhook', (req, res) => {
+    const wfId = parseInt(req.params.id);
+    const wf = workflows.get(wfId);
+    if (!wf) return res.status(404).json({ error: 'Not found' });
+
+    let webhookId = wf.webhook_id;
+    if (!webhookId) {
+      webhookId = crypto.randomUUID().replace(/-/g, '').substring(0, 16);
+      db.prepare('UPDATE workflows SET webhook_id = ? WHERE id = ?').run(webhookId, wfId);
+    }
+    res.json({ webhookId, url: `/api/webhook/${webhookId}` });
+  });
+
+  // Delete webhook
+  app.delete('/api/workflows/:id/webhook', (req, res) => {
+    const wfId = parseInt(req.params.id);
+    db.prepare('UPDATE workflows SET webhook_id = NULL WHERE id = ?').run(wfId);
+    res.json({ ok: true });
+  });
+
+  // Trigger workflow via webhook
+  app.post('/api/webhook/:webhookId', async (req, res) => {
+    const wf = db.prepare('SELECT * FROM workflows WHERE webhook_id = ?').get(req.params.webhookId);
+    if (!wf) return res.status(404).json({ error: 'Webhook not found' });
+
+    const userId = wf.user_id;
+    try {
+      const result = await scheduler.executeWithTracking(userId, wf.id, 'webhook');
+      gamification.addXP(userId, 'workflow_run');
+      res.json({ ok: true, workflowId: wf.id, runId: result.runId, passed: result.passed, failed: result.failed });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // ==================== SSE EXECUTION STREAM ====================
+  app.get('/api/workflows/:id/stream', (req, res) => {
+    const wfId = parseInt(req.params.id);
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+      'X-Accel-Buffering': 'no',
+    });
+    res.write(`event: connected\ndata: ${JSON.stringify({ workflowId: wfId })}\n\n`);
+    scheduler.addSSEClient(wfId, res);
+  });
+
+  // Execute workflow with SSE tracking
+  app.post('/api/workflows/:id/execute', async (req, res) => {
+    const userId = getUserId(req);
+    const wfId = parseInt(req.params.id);
+    try {
+      const result = await scheduler.executeWithTracking(userId, wfId, 'manual');
+      gamification.addXP(userId, 'workflow_run');
+      const wf = workflows.get(wfId);
+      const nodes = workflows.getNodes(wfId);
+      const edges = workflows.getEdges(wfId);
+      res.json({ ...wf, nodes, edges, runId: result.runId, passed: result.passed, failed: result.failed });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // ==================== SCHEDULER ====================
+  app.get('/api/schedules', (req, res) => {
+    const userId = getUserId(req);
+    const schedules = scheduler.listByUser(userId).map(s => ({
+      ...s,
+      description: scheduler.describeCron(s.cron_expression),
+      nextRun: s.next_run_at,
+    }));
+    res.json(schedules);
+  });
+
+  app.post('/api/workflows/:id/schedule', (req, res) => {
+    const userId = getUserId(req);
+    const wfId = parseInt(req.params.id);
+    const { cronExpression } = req.body;
+    if (!cronExpression) return res.status(400).json({ error: 'cronExpression required' });
+
+    // Check if schedule already exists
+    const existing = scheduler.getByWorkflow(wfId);
+    if (existing) {
+      scheduler.update(existing.id, {
+        cron_expression: cronExpression,
+        next_run_at: scheduler.getNextRunTime(cronExpression)?.toISOString() || null,
+      });
+      return res.json(scheduler.get(existing.id));
+    }
+
+    const schedule = scheduler.create(wfId, userId, cronExpression);
+    res.json(schedule);
+  });
+
+  app.put('/api/schedules/:id/toggle', (req, res) => {
+    scheduler.toggle(parseInt(req.params.id));
+    res.json({ ok: true });
+  });
+
+  app.delete('/api/schedules/:id', (req, res) => {
+    scheduler.delete(parseInt(req.params.id));
+    res.json({ ok: true });
+  });
+
+  // ==================== RUN HISTORY ====================
+  app.get('/api/workflows/:id/history', (req, res) => {
+    const history = scheduler.getRunHistory(parseInt(req.params.id));
+    res.json(history);
+  });
+
+  // ==================== WORKFLOW IMPORT ====================
+  app.post('/api/workflows/import', async (req, res) => {
+    const userId = getUserId(req);
+    const { data } = req.body;
+    if (!data || !data.workflow) return res.status(400).json({ error: 'Invalid import data' });
+
+    try {
+      const imported = data.workflow;
+      const wf = workflows.create(userId, `${imported.title || 'Imported'} (copy)`, imported.description || '');
+
+      const nodeIdMap = {};
+      for (const node of (data.nodes || [])) {
+        const newNode = workflows.addNode(
+          wf.id, node.name, node.node_type || 'process',
+          node.description || '',
+          JSON.parse(node.inputs || '[]'),
+          JSON.parse(node.outputs || '[]')
+        );
+        if (node.config) workflows.setNodeConfig(newNode.id, JSON.parse(node.config));
+        if (node.custom_script) workflows.saveScript(newNode.id, node.custom_script);
+        nodeIdMap[node.id] = newNode.id;
+      }
+
+      for (const edge of (data.edges || [])) {
+        const fromId = nodeIdMap[edge.from_node_id];
+        const toId = nodeIdMap[edge.to_node_id];
+        if (fromId && toId) {
+          workflows.connect(wf.id, fromId, toId, edge.from_output || 'default', edge.to_input || 'default');
+        }
+      }
+
+      const nodes = workflows.getNodes(wf.id);
+      const edges = workflows.getEdges(wf.id);
+      res.json({ ...wf, nodes, edges });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // ==================== SEARCH ====================
+  app.get('/api/search', (req, res) => {
+    const userId = getUserId(req);
+    const q = (req.query.q || '').trim().toLowerCase();
+    if (!q) return res.json({ boards: [], workflows: [], drafts: [] });
+
+    const boardResults = boards.listByUser(userId).filter(b =>
+      b.title.toLowerCase().includes(q) || (b.description || '').toLowerCase().includes(q)
+    ).slice(0, 10);
+
+    const wfResults = workflows.listByUser(userId).filter(w =>
+      w.title.toLowerCase().includes(q) || (w.description || '').toLowerCase().includes(q)
+    ).slice(0, 10);
+
+    const draftResults = drafts.listByUser(userId).filter(d =>
+      (d.title || '').toLowerCase().includes(q) || (d.url || '').toLowerCase().includes(q) || (d.description || '').toLowerCase().includes(q)
+    ).slice(0, 10);
+
+    res.json({ boards: boardResults, workflows: wfResults, drafts: draftResults });
+  });
+
   // SPA fallback — don't catch API routes
   app.get('*', (req, res) => {
     if (req.path.startsWith('/api/')) {
@@ -954,6 +1118,9 @@ After the JSON array, add a markdown section starting with "---\\n**Knowledge & 
     }
     res.sendFile(join(__dirname, 'public', 'index.html'));
   });
+
+  // Start the scheduler
+  scheduler.start();
 
   return new Promise((resolve) => {
     const server = app.listen(port, () => {

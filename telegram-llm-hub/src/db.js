@@ -157,4 +157,50 @@ try {
   db.exec("ALTER TABLE workflow_nodes ADD COLUMN custom_script TEXT DEFAULT NULL");
 }
 
+// Add webhook_id to workflows
+try {
+  db.prepare("SELECT webhook_id FROM workflows LIMIT 0").get();
+} catch {
+  db.exec("ALTER TABLE workflows ADD COLUMN webhook_id TEXT DEFAULT NULL");
+}
+
+// Workflow schedules table
+db.exec(`
+  CREATE TABLE IF NOT EXISTS workflow_schedules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    workflow_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    cron_expression TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    last_run_at DATETIME,
+    next_run_at DATETIME,
+    run_count INTEGER NOT NULL DEFAULT 0,
+    last_status TEXT DEFAULT 'pending',
+    last_error TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (workflow_id) REFERENCES workflows(id) ON DELETE CASCADE
+  );
+
+  CREATE TABLE IF NOT EXISTS workflow_run_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    workflow_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    trigger_type TEXT NOT NULL DEFAULT 'manual',
+    status TEXT NOT NULL DEFAULT 'running',
+    started_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    finished_at DATETIME,
+    node_count INTEGER DEFAULT 0,
+    passed_count INTEGER DEFAULT 0,
+    failed_count INTEGER DEFAULT 0,
+    results TEXT,
+    error TEXT,
+    FOREIGN KEY (workflow_id) REFERENCES workflows(id) ON DELETE CASCADE
+  );
+
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_ws_workflow_id ON workflow_schedules(workflow_id);
+  CREATE INDEX IF NOT EXISTS idx_ws_user_id ON workflow_schedules(user_id);
+  CREATE INDEX IF NOT EXISTS idx_wrh_workflow_started ON workflow_run_history(workflow_id, started_at);
+  CREATE INDEX IF NOT EXISTS idx_wrh_user_id ON workflow_run_history(user_id);
+`);
+
 export default db;

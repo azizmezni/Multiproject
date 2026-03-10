@@ -29,6 +29,10 @@
       <span class="logo-icon">⚡</span>
       <span class="logo-text">LLM Hub</span>
     </div>
+    <div class="search-bar">
+      <input class="input search-input" id="global-search" placeholder="🔍 Search boards, workflows, drafts..."
+        oninput="globalSearch(this.value)" onfocus="if(this.value)globalSearch(this.value)" onblur="setTimeout(closeSearch,200)">
+    </div>
     <div class="stats-bar">
       <div class="stat-item" id="xp-display">
         <span class="stat-label">XP</span>

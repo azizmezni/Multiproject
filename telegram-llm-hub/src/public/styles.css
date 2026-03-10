@@ -787,6 +787,72 @@ body {
 .project-card:hover { border-color: var(--cyan); transform: translateY(-2px); box-shadow: 0 4px 20px rgba(0,240,255,0.1); }
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
 
+/* ========== SEARCH BAR ========== */
+.search-bar { flex: 0 0 260px; position: relative; }
+.search-input {
+  width: 100%;
+  padding: 8px 14px 8px 14px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  color: var(--text);
+  font-size: 13px;
+  transition: all 0.3s;
+}
+.search-input:focus { border-color: var(--cyan); box-shadow: 0 0 12px rgba(0,240,255,0.15); }
+.search-dropdown {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  margin-top: 6px;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 6px;
+  z-index: 200;
+  box-shadow: var(--shadow);
+  max-height: 300px;
+  overflow-y: auto;
+  animation: fadeSlideIn 0.2s ease-out;
+}
+.search-item {
+  padding: 8px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 13px;
+  transition: background 0.15s;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.search-item:hover { background: var(--surface); }
+.search-type { font-size: 16px; min-width: 24px; text-align: center; }
+.search-empty { padding: 16px; text-align: center; color: var(--text2); font-size: 12px; }
+
+/* ========== SCHEDULE INFO ========== */
+.schedule-info {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+  margin-bottom: 16px;
+  border-left: 3px solid var(--orange);
+}
+
+/* ========== HISTORY ROW ========== */
+.history-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  margin-bottom: 4px;
+  background: var(--bg);
+  transition: all 0.2s;
+}
+.history-row:hover { background: var(--surface); }
+
 /* ========== RESPONSIVE ========== */
 @media (max-width: 768px) {
   .sidebar { width: 56px; padding: 8px 4px; }

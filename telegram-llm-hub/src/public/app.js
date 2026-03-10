@@ -7,9 +7,11 @@ let state = {
   workflows: [],
   drafts: [],
   sessions: [],
+  schedules: [],
   nodeTypes: {},
   chatSessionId: null,
   activeSection: 'home',
+  searchQuery: '',
 };
 
 // ===================== API HELPERS =====================
@@ -45,6 +47,7 @@ async function refreshAll() {
     const results = await Promise.allSettled([
       GET('/stats'), GET('/providers'), GET('/boards'),
       GET('/workflows'), GET('/drafts'), GET('/sessions'), GET('/node-types'),
+      GET('/schedules'),
     ]);
     const val = (i, fallback) => results[i].status === 'fulfilled' ? results[i].value : fallback;
     state.stats = val(0, state.stats);
@@ -56,6 +59,7 @@ async function refreshAll() {
     state.drafts = val(4, state.drafts || []);
     state.sessions = val(5, state.sessions || []);
     state.nodeTypes = val(6, state.nodeTypes || {});
+    state.schedules = val(7, state.schedules || []);
     updateHeader();
   } catch (err) {
     console.error('Failed to refresh app state:', err);
@@ -120,7 +124,7 @@ function renderHome(el) {
         <div class="card-header"><div class="card-title">📋 Recent Boards</div><button class="btn btn-sm" onclick="showSection('boards')">View All</button></div>
         ${state.boards.length === 0 ? '<div class="card-subtitle">No boards yet</div>' :
           state.boards.slice(0, 3).map(b => `<div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border)">
-            <span>${b.title}</span><span class="badge badge-${b.status === 'completed' ? 'green' : b.status === 'executing' ? 'orange' : 'blue'}">${b.status}</span>
+            <span>${escapeHtml(b.title)}</span><span class="badge badge-${b.status === 'completed' ? 'green' : b.status === 'executing' ? 'orange' : 'blue'}">${escapeHtml(b.status)}</span>
           </div>`).join('')}
       </div>
       <div class="card">
@@ -226,7 +230,7 @@ async function renderBoards(el) {
         const pct = tasks.length > 0 ? Math.round((done / tasks.length) * 100) : 0;
         return `<div class="card" onclick="viewBoard(${b.id})" style="cursor:pointer">
           <div class="card-header">
-            <div><div class="card-title">${b.title}</div><div class="card-subtitle">${tasks.length} tasks · ${b.status}</div></div>
+            <div><div class="card-title">${escapeHtml(b.title)}</div><div class="card-subtitle">${tasks.length} tasks · ${escapeHtml(b.status)}</div></div>
             <div class="badge badge-${b.status === 'completed' ? 'green' : b.status === 'executing' ? 'orange' : 'blue'}">${pct}%</div>
           </div>
           <div style="height:4px;background:var(--bg3);border-radius:2px;overflow:hidden"><div style="height:100%;width:${pct}%;background:linear-gradient(90deg,var(--cyan),var(--green));border-radius:2px;transition:width 0.5s"></div></div>
@@ -265,8 +269,8 @@ async function viewBoard(boardId) {
 
   content.innerHTML = `
     <div class="section-title">
-      <span class="icon">📋</span> ${board.title}
-      <span class="badge badge-${board.status === 'completed' ? 'green' : 'blue'}" style="margin-left:8px">${board.status}</span>
+      <span class="icon">📋</span> ${escapeHtml(board.title)}
+      <span class="badge badge-${board.status === 'completed' ? 'green' : 'blue'}" style="margin-left:8px">${escapeHtml(board.status)}</span>
       <div style="margin-left:auto;display:flex;gap:8px">
         <button class="btn btn-sm" onclick="renderBoards(document.getElementById('content'))">← Back</button>
         <button class="btn btn-sm btn-primary" onclick="addTaskPrompt(${board.id})">+ Task</button>
@@ -294,9 +298,9 @@ function taskCard(t, boardId) {
   const qaClass = t.qa_status === 'pass' ? 'pass' : t.qa_status === 'fail' ? 'fail' : 'pending';
   const needsQ = t.requires_input && !t.input_answer;
   return `<div class="task-card" onclick="taskDetail(${t.id}, ${boardId})">
-    <div class="task-title">${needsQ ? '❓ ' : ''}${t.title}</div>
+    <div class="task-title">${needsQ ? '❓ ' : ''}${escapeHtml(t.title)}</div>
     <div class="task-meta">
-      <span class="task-qa ${qaClass}">QA: ${t.qa_status}</span>
+      <span class="task-qa ${qaClass}">QA: ${escapeHtml(t.qa_status)}</span>
       ${t.tools_needed ? `<span>🔧</span>` : ''}
     </div>
   </div>`;
@@ -310,13 +314,13 @@ async function taskDetail(taskId, boardId) {
   const statusOpts = ['pending', 'in_progress', 'done'].map(s =>
     `<button class="btn btn-sm ${task.status === s ? 'btn-primary' : ''}" onclick="setTaskStatus(${taskId},${boardId},'${s}')">${s}</button>`).join('');
 
-  showModal(`Task: ${task.title}`, `
-    <p style="color:var(--text2);margin-bottom:12px">${task.description || 'No description'}</p>
+  showModal(`Task: ${escapeHtml(task.title)}`, `
+    <p style="color:var(--text2);margin-bottom:12px">${escapeHtml(task.description || 'No description')}</p>
     <div class="form-group"><label class="form-label">Status</label><div class="btn-group">${statusOpts}</div></div>
-    ${task.requires_input ? `<div class="form-group"><label class="form-label">❓ ${task.input_question || 'Input needed'}</label>
-      <input class="input" id="task-answer" value="${task.input_answer || ''}" placeholder="Your answer...">
+    ${task.requires_input ? `<div class="form-group"><label class="form-label">❓ ${escapeHtml(task.input_question || 'Input needed')}</label>
+      <input class="input" id="task-answer" value="${escapeAttr(task.input_answer || '')}" placeholder="Your answer...">
       <button class="btn btn-sm" style="margin-top:6px" onclick="answerTask(${taskId},${boardId})">Save Answer</button></div>` : ''}
-    <div class="form-group"><label class="form-label">QA Status: <span class="badge badge-${task.qa_status === 'pass' ? 'green' : task.qa_status === 'fail' ? 'red' : 'blue'}">${task.qa_status}</span></label>
+    <div class="form-group"><label class="form-label">QA Status: <span class="badge badge-${task.qa_status === 'pass' ? 'green' : task.qa_status === 'fail' ? 'red' : 'blue'}">${escapeHtml(task.qa_status)}</span></label>
       <button class="btn btn-sm" onclick="runQA(${taskId},${boardId})">🧪 Run QA</button></div>
     <button class="btn" onclick="closeModal()">Close</button>
   `);
@@ -343,13 +347,24 @@ async function addTask(boardId) {
 async function renderWorkflows(el) {
   await refreshAll();
   el.innerHTML = `
-    <div class="section-title"><span class="icon">🔀</span> Workflows <button class="btn btn-primary btn-sm" onclick="promptNewWorkflow()" style="margin-left:auto">+ New Workflow</button></div>
+    <div class="section-title">
+      <span class="icon">🔀</span> Workflows
+      <div style="margin-left:auto;display:flex;gap:8px">
+        <button class="btn btn-sm" onclick="importWorkflow()">📥 Import</button>
+        <button class="btn btn-primary btn-sm" onclick="promptNewWorkflow()">+ New Workflow</button>
+      </div>
+    </div>
     ${state.workflows.length === 0 ? '<div class="empty-state"><div class="empty-icon">🔀</div><h3>No workflows</h3><p>Create n8n-style workflows to automate tasks</p></div>' :
-      `<div class="grid grid-2">${state.workflows.map(w => `
-        <div class="card" onclick="viewWorkflow(${w.id})" style="cursor:pointer">
-          <div class="card-header"><div class="card-title">🔀 ${w.title}</div><span class="badge badge-${w.status === 'completed' ? 'green' : 'blue'}">${w.status}</span></div>
+      `<div class="grid grid-2">${state.workflows.map(w => {
+        const sched = state.schedules.find(s => s.workflow_id === w.id);
+        const schedBadge = sched ? `<span class="badge ${sched.enabled ? 'badge-orange' : 'badge-red'}" title="${escapeAttr(sched.description || '')}">⏰ ${sched.enabled ? sched.description : 'paused'}</span>` : '';
+        const webhookBadge = w.webhook_id ? '<span class="badge badge-purple">🔗 webhook</span>' : '';
+        return `<div class="card" onclick="viewWorkflow(${w.id})" style="cursor:pointer">
+          <div class="card-header"><div class="card-title">🔀 ${escapeHtml(w.title)}</div><span class="badge badge-${w.status === 'completed' ? 'green' : 'blue'}">${w.status}</span></div>
           <div class="card-subtitle">${(w.nodes || []).length} nodes · ${(w.edges || []).length} connections</div>
-        </div>`).join('')}</div>`}`;
+          <div style="display:flex;gap:4px;margin-top:6px;flex-wrap:wrap">${schedBadge}${webhookBadge}</div>
+        </div>`;
+      }).join('')}</div>`}`;
 }
 
 function promptNewWorkflow() {
@@ -389,6 +404,9 @@ async function viewWorkflow(wfId) {
         <button class="btn btn-sm btn-primary" onclick="addNodePrompt(${wf.id})">+ Node</button>
         <button class="btn btn-sm" onclick="executeWorkflow(${wf.id})">⚡ Run</button>
         <button class="btn btn-sm btn-autofix" onclick="autoFixWorkflow(${wf.id})">🔧 Mini Fix</button>
+        <button class="btn btn-sm" onclick="scheduleWorkflow(${wf.id})">⏰ Schedule</button>
+        <button class="btn btn-sm" onclick="webhookWorkflow(${wf.id})">🔗 Webhook</button>
+        <button class="btn btn-sm" onclick="workflowHistory(${wf.id})">📊 History</button>
         <button class="btn btn-sm" onclick="exportWorkflow(${wf.id})">📦 Export</button>
         <button class="btn btn-sm btn-danger" onclick="deleteWorkflow(${wf.id})">🗑️</button>
       </div>
@@ -1110,10 +1128,14 @@ async function updateNode(nodeId, wfId) {
 }
 async function deleteNode(nodeId, wfId) { await DEL(`/workflows/nodes/${nodeId}`); closeModal(); await refreshAll(); viewWorkflow(wfId); }
 async function executeWorkflow(wfId) {
-  const content = document.getElementById('content');
-  const wf = await POST(`/workflows/${wfId}/execute`);
-  await refreshAll(); updateHeader(); viewWorkflow(wfId);
-  showToast('⚡', 'Workflow executed!');
+  connectSSE(wfId); // Connect SSE for real-time updates
+  showToast('⚡', 'Workflow executing...');
+  try {
+    const wf = await POST(`/workflows/${wfId}/execute`);
+    await refreshAll(); updateHeader(); viewWorkflow(wfId);
+  } catch (err) {
+    showToast('❌', `Execution failed: ${err.message}`);
+  }
 }
 async function deleteWorkflow(wfId) { if (!confirm('Delete?')) return; await DEL(`/workflows/${wfId}`); await refreshAll(); renderWorkflows(document.getElementById('content')); }
 
@@ -1160,7 +1182,7 @@ async function expandDraft(draftId) {
               <div class="expand-plan-title">${escapeHtml(p.title)}</div>
               <span class="badge ${diffColor}">${escapeHtml(p.difficulty || 'Medium')}</span>
             </div>
-            <button class="btn btn-sm btn-primary" style="margin-left:auto" onclick="cloneDraft(${draftId}, '${escapeAttr(p.title)}', '${escapeAttr((p.description || '').substring(0, 500))}')">📋 Build This</button>
+            <button class="btn btn-sm btn-primary" style="margin-left:auto" onclick="cloneDraft(${draftId}, decodeURIComponent('${encodeURIComponent(p.title)}'), decodeURIComponent('${encodeURIComponent((p.description || '').substring(0, 500))}'))">📋 Build This</button>
           </div>
           <p class="expand-plan-desc">${escapeHtml(p.description || '')}</p>
           ${(p.features || []).length > 0 ? `<div class="expand-plan-section"><strong>Features:</strong> ${p.features.map(f => `<span class="badge badge-blue" style="margin:2px">${escapeHtml(f)}</span>`).join('')}</div>` : ''}
@@ -1266,7 +1288,7 @@ async function renderProjects(el) {
       <div class="section-title"><span class="icon">🚀</span> Exported Projects <span class="badge badge-blue">${projects.length}</span></div>
       <div class="grid grid-2">${projectCards}</div>`;
   } catch (err) {
-    el.innerHTML = `<div class="section-title"><span class="icon">🚀</span> Projects</div><p style="color:var(--pink)">Error: ${err.message}</p>`;
+    el.innerHTML = `<div class="section-title"><span class="icon">🚀</span> Projects</div><p style="color:var(--pink)">Error: ${escapeHtml(err.message)}</p>`;
   }
 }
 
@@ -1326,14 +1348,19 @@ async function sendChat() {
   container.innerHTML += `<div class="chat-msg assistant" id="typing" style="opacity:0.5">Thinking...</div>`;
   container.scrollTop = container.scrollHeight;
 
-  const result = await POST('/chat', { message: msg, sessionId: state.chatSessionId });
-  document.getElementById('typing')?.remove();
+  try {
+    const result = await POST('/chat', { message: msg, sessionId: state.chatSessionId });
+    document.getElementById('typing')?.remove();
 
-  if (result.reply) {
-    state.chatSessionId = result.sessionId;
-    container.innerHTML += `<div class="chat-msg assistant">${escapeHtml(result.reply)}<div class="msg-meta">${result.provider} · ${result.model}</div></div>`;
-  } else {
-    container.innerHTML += `<div class="chat-msg assistant" style="color:var(--red)">Error: ${result.error}</div>`;
+    if (result.reply) {
+      state.chatSessionId = result.sessionId;
+      container.innerHTML += `<div class="chat-msg assistant">${escapeHtml(result.reply)}<div class="msg-meta">${escapeHtml(result.provider)} · ${escapeHtml(result.model)}</div></div>`;
+    } else {
+      container.innerHTML += `<div class="chat-msg assistant" style="color:var(--red)">Error: ${escapeHtml(result.error)}</div>`;
+    }
+  } catch (err) {
+    document.getElementById('typing')?.remove();
+    container.innerHTML += `<div class="chat-msg assistant" style="color:var(--red)">Error: ${escapeHtml(err.message)}</div>`;
   }
   container.scrollTop = container.scrollHeight;
   await refreshAll(); updateHeader();
@@ -1362,7 +1389,8 @@ function showModal(title, bodyHtml) {
   const backdrop = document.createElement('div');
   backdrop.className = 'modal-backdrop';
   backdrop.onclick = (e) => { if (e.target === backdrop) closeModal(); };
-  backdrop.innerHTML = `<div class="modal"><h3>${title}</h3>${bodyHtml}</div>`;
+  const safeTitle = escapeHtml(title);
+  backdrop.innerHTML = `<div class="modal"><h3>${safeTitle}</h3>${bodyHtml}</div>`;
   document.body.appendChild(backdrop);
 }
 function showWideModal(title, bodyHtml) {
@@ -1371,7 +1399,8 @@ function showWideModal(title, bodyHtml) {
   const backdrop = document.createElement('div');
   backdrop.className = 'modal-backdrop';
   backdrop.onclick = (e) => { if (e.target === backdrop) closeModal(); };
-  backdrop.innerHTML = `<div class="modal modal-wide"><h3>${title}</h3>${bodyHtml}</div>`;
+  const safeTitle = escapeHtml(title);
+  backdrop.innerHTML = `<div class="modal modal-wide"><h3>${safeTitle}</h3>${bodyHtml}</div>`;
   document.body.appendChild(backdrop);
 }
 function closeModal() { document.querySelector('.modal-backdrop')?.remove(); }
@@ -1405,12 +1434,270 @@ function showToast(icon, text) {
 
 function closeLevelUp() { document.getElementById('levelup-overlay').classList.add('hidden'); }
 
+// ===================== SEARCH =====================
+let _searchDebounce = null;
+async function globalSearch(query) {
+  state.searchQuery = query;
+  clearTimeout(_searchDebounce);
+  if (!query.trim()) {
+    document.getElementById('search-results')?.remove();
+    return;
+  }
+  _searchDebounce = setTimeout(async () => {
+    try {
+      const results = await GET(`/search?q=${encodeURIComponent(query)}`);
+      showSearchResults(results, query);
+    } catch {}
+  }, 300);
+}
+
+function showSearchResults(results, query) {
+  let dropdown = document.getElementById('search-results');
+  if (!dropdown) {
+    dropdown = document.createElement('div');
+    dropdown.id = 'search-results';
+    dropdown.className = 'search-dropdown';
+    document.querySelector('.header').appendChild(dropdown);
+  }
+
+  const items = [];
+  for (const b of (results.boards || []).slice(0, 3)) {
+    items.push(`<div class="search-item" onclick="viewBoard(${b.id});closeSearch()"><span class="search-type">📋</span> ${escapeHtml(b.title)}</div>`);
+  }
+  for (const w of (results.workflows || []).slice(0, 3)) {
+    items.push(`<div class="search-item" onclick="viewWorkflow(${w.id});closeSearch()"><span class="search-type">🔀</span> ${escapeHtml(w.title)}</div>`);
+  }
+  for (const d of (results.drafts || []).slice(0, 3)) {
+    items.push(`<div class="search-item" onclick="showSection('drafts');closeSearch()"><span class="search-type">📥</span> ${escapeHtml(d.title || d.url || 'Draft')}</div>`);
+  }
+
+  dropdown.innerHTML = items.length > 0 ? items.join('') : '<div class="search-empty">No results</div>';
+}
+
+function closeSearch() {
+  document.getElementById('search-results')?.remove();
+  const searchInput = document.getElementById('global-search');
+  if (searchInput) searchInput.value = '';
+}
+
+// ===================== WORKFLOW SCHEDULER =====================
+function scheduleWorkflow(wfId) {
+  const existing = state.schedules.find(s => s.workflow_id === wfId);
+  const cronPresets = [
+    { label: 'Every 5 min', cron: '*/5 * * * *' },
+    { label: 'Every 30 min', cron: '*/30 * * * *' },
+    { label: 'Hourly', cron: '0 * * * *' },
+    { label: 'Daily 9 AM', cron: '0 9 * * *' },
+    { label: 'Weekdays 9 AM', cron: '0 9 * * 1-5' },
+    { label: 'Weekly Monday', cron: '0 9 * * 1' },
+  ];
+
+  showModal('⏰ Schedule Workflow', `
+    ${existing ? `<div class="schedule-info"><span class="badge ${existing.enabled ? 'badge-green' : 'badge-red'}">${existing.enabled ? 'Active' : 'Paused'}</span> <span style="color:var(--text2);font-size:12px">${escapeHtml(existing.description || existing.cron_expression)}</span>
+      ${existing.last_run_at ? `<div style="font-size:11px;color:var(--text2);margin-top:4px">Last run: ${new Date(existing.last_run_at).toLocaleString()} · Status: ${existing.last_status}</div>` : ''}
+      <div class="btn-group" style="margin-top:8px">
+        <button class="btn btn-sm" onclick="toggleSchedule(${existing.id})">${existing.enabled ? '⏸ Pause' : '▶ Resume'}</button>
+        <button class="btn btn-sm btn-danger" onclick="deleteSchedule(${existing.id},${wfId})">🗑️ Remove</button>
+      </div>
+    </div>` : ''}
+    <div class="form-group">
+      <label class="form-label">Preset Schedules</label>
+      <div class="btn-group">${cronPresets.map(p =>
+        `<button class="btn btn-sm" onclick="document.getElementById('cron-input').value='${p.cron}'">${p.label}</button>`
+      ).join('')}</div>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Cron Expression</label>
+      <input class="input" id="cron-input" value="${existing?.cron_expression || '0 9 * * *'}" placeholder="min hour day month weekday" style="font-family:monospace">
+      <p style="font-size:10px;color:var(--text2);margin-top:4px">Format: minute(0-59) hour(0-23) day(1-31) month(1-12) weekday(0-6, 0=Sun)</p>
+    </div>
+    <div class="btn-group">
+      <button class="btn btn-primary" onclick="saveSchedule(${wfId})">${existing ? '💾 Update' : '⏰ Create'} Schedule</button>
+      <button class="btn" onclick="closeModal()">Cancel</button>
+    </div>
+  `);
+}
+
+async function saveSchedule(wfId) {
+  const cron = document.getElementById('cron-input').value.trim();
+  if (!cron) return;
+  try {
+    await POST(`/workflows/${wfId}/schedule`, { cronExpression: cron });
+    closeModal();
+    showToast('⏰', 'Schedule saved!');
+    await refreshAll();
+  } catch (err) {
+    showToast('❌', err.message);
+  }
+}
+
+async function toggleSchedule(scheduleId) {
+  await PUT(`/schedules/${scheduleId}/toggle`);
+  closeModal();
+  showToast('⏰', 'Schedule updated!');
+  await refreshAll();
+}
+
+async function deleteSchedule(scheduleId, wfId) {
+  await DEL(`/schedules/${scheduleId}`);
+  closeModal();
+  showToast('🗑️', 'Schedule removed');
+  await refreshAll();
+}
+
+// ===================== WEBHOOKS =====================
+async function webhookWorkflow(wfId) {
+  const wf = state.workflows.find(w => w.id === wfId);
+  const hasWebhook = wf?.webhook_id;
+
+  if (hasWebhook) {
+    const webhookUrl = `${location.origin}/api/webhook/${wf.webhook_id}`;
+    showModal('🔗 Webhook Trigger', `
+      <div class="form-group">
+        <label class="form-label">Webhook URL</label>
+        <div class="key-input-row">
+          <input class="input" value="${webhookUrl}" readonly id="webhook-url" style="font-family:monospace;font-size:11px">
+          <button class="btn btn-sm" onclick="copyToClipboard('${escapeAttr(webhookUrl)}')">📋</button>
+        </div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Usage (curl)</label>
+        <pre class="nd-result-pre" style="font-size:11px">curl -X POST ${webhookUrl}</pre>
+      </div>
+      <div class="btn-group">
+        <button class="btn btn-danger btn-sm" onclick="deleteWebhook(${wfId})">🗑️ Remove Webhook</button>
+        <button class="btn" onclick="closeModal()">Close</button>
+      </div>
+    `);
+  } else {
+    try {
+      const result = await POST(`/workflows/${wfId}/webhook`);
+      const webhookUrl = `${location.origin}${result.url}`;
+      showToast('🔗', 'Webhook created!');
+      await refreshAll();
+      webhookWorkflow(wfId);
+    } catch (err) {
+      showToast('❌', err.message);
+    }
+  }
+}
+
+async function deleteWebhook(wfId) {
+  await DEL(`/workflows/${wfId}/webhook`);
+  closeModal();
+  showToast('🗑️', 'Webhook removed');
+  await refreshAll();
+}
+
+// ===================== WORKFLOW IMPORT =====================
+function importWorkflow() {
+  showModal('📥 Import Workflow', `
+    <p style="color:var(--text2);margin-bottom:12px">Paste a JSON workflow export or select a file:</p>
+    <div class="form-group">
+      <label class="form-label">JSON Data</label>
+      <textarea class="textarea" id="import-json" rows="8" placeholder='{"workflow":{...},"nodes":[...],"edges":[...]}'></textarea>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Or upload file</label>
+      <input type="file" id="import-file" accept=".json" onchange="loadImportFile()" style="color:var(--text2);font-size:12px">
+    </div>
+    <div class="btn-group">
+      <button class="btn btn-primary" onclick="doImport()">📥 Import</button>
+      <button class="btn" onclick="closeModal()">Cancel</button>
+    </div>
+  `);
+}
+
+function loadImportFile() {
+  const file = document.getElementById('import-file').files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = (e) => { document.getElementById('import-json').value = e.target.result; };
+  reader.readAsText(file);
+}
+
+async function doImport() {
+  const raw = document.getElementById('import-json').value.trim();
+  if (!raw) return;
+  try {
+    const data = JSON.parse(raw);
+    const result = await POST('/workflows/import', { data });
+    closeModal();
+    showToast('📥', 'Workflow imported!');
+    await refreshAll();
+    if (result.id) viewWorkflow(result.id);
+  } catch (err) {
+    showToast('❌', `Import failed: ${err.message}`);
+  }
+}
+
+// ===================== RUN HISTORY =====================
+async function workflowHistory(wfId) {
+  try {
+    const history = await GET(`/workflows/${wfId}/history`);
+    const rows = history.map(h => {
+      const statusBadge = h.status === 'completed' ? 'badge-green' : h.status === 'failed' ? 'badge-red' : 'badge-orange';
+      const trigger = h.trigger_type === 'schedule' ? '⏰' : h.trigger_type === 'webhook' ? '🔗' : '▶';
+      const duration = h.finished_at ? `${Math.round((new Date(h.finished_at) - new Date(h.started_at)) / 1000)}s` : '...';
+      return `<div class="history-row">
+        <span>${trigger}</span>
+        <span style="flex:1;font-size:12px">${new Date(h.started_at).toLocaleString()}</span>
+        <span class="badge ${statusBadge}">${h.status}</span>
+        <span style="font-size:11px;color:var(--text2)">${duration}</span>
+        ${h.node_count ? `<span style="font-size:11px"><span style="color:var(--green)">✅${h.passed_count}</span> <span style="color:var(--red)">❌${h.failed_count}</span></span>` : ''}
+      </div>`;
+    }).join('');
+
+    showModal('📊 Run History', `
+      ${rows || '<div style="color:var(--text2);text-align:center;padding:20px">No runs yet</div>'}
+      <button class="btn" style="margin-top:12px" onclick="closeModal()">Close</button>
+    `);
+  } catch (err) {
+    showToast('❌', err.message);
+  }
+}
+
+// ===================== SSE EXECUTION STREAM =====================
+let _activeSSE = null;
+
+function connectSSE(wfId) {
+  if (_activeSSE) { _activeSSE.close(); _activeSSE = null; }
+  const source = new EventSource(`/api/workflows/${wfId}/stream`);
+  _activeSSE = source;
+
+  source.addEventListener('node', (e) => {
+    const data = JSON.parse(e.data);
+    const nodeEl = document.getElementById(`wfnode-${data.nodeId}`);
+    if (nodeEl) {
+      nodeEl.className = nodeEl.className.replace(/\b(running|done|error)\b/g, '').trim();
+      if (data.status === 'running') nodeEl.classList.add('running');
+      else if (data.status === 'done') nodeEl.classList.add('done');
+      else if (data.status === 'error') nodeEl.classList.add('error');
+    }
+  });
+
+  source.addEventListener('complete', (e) => {
+    const data = JSON.parse(e.data);
+    showToast('⚡', `Workflow done! ✅${data.passed} ❌${data.failed}`);
+    source.close();
+    _activeSSE = null;
+  });
+
+  source.addEventListener('error', (e) => {
+    source.close();
+    _activeSSE = null;
+  });
+
+  return source;
+}
+
 function escapeHtml(text) {
+  if (text == null) return '';
   const div = document.createElement('div');
   div.textContent = text;
   return div.innerHTML;
 }
 
 function escapeAttr(text) {
-  return String(text).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/'/g, '&#39;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/`/g, '&#96;');
+  return String(text == null ? '' : text).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/'/g, '&#39;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/`/g, '&#96;').replace(/\n/g, '&#10;').replace(/\r/g, '&#13;');
 }
