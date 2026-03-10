@@ -9,6 +9,8 @@ export const NODE_TYPES = {
   api: { emoji: '\ud83c\udf10', label: 'API Call', desc: 'Makes HTTP requests' },
   file: { emoji: '\ud83d\udcc4', label: 'File I/O', desc: 'Reads or writes files' },
   decision: { emoji: '\ud83d\udd00', label: 'Decision', desc: 'Branches based on condition' },
+  condition: { emoji: '🔀', label: 'If/Else', desc: 'Routes to true/false paths based on expression' },
+  switch_node: { emoji: '🔃', label: 'Switch', desc: 'Routes to named paths by matching value' },
   output: { emoji: '\ud83d\udce4', label: 'Output', desc: 'Final output or result' },
   cli: { emoji: '\ud83d\udcdf', label: 'CLI', desc: 'Runs shell commands' },
   merge: { emoji: '\ud83d\udd00', label: 'Merge', desc: 'Combines multiple inputs' },

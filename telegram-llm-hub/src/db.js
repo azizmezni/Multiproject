@@ -201,6 +201,121 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_ws_user_id ON workflow_schedules(user_id);
   CREATE INDEX IF NOT EXISTS idx_wrh_workflow_started ON workflow_run_history(workflow_id, started_at);
   CREATE INDEX IF NOT EXISTS idx_wrh_user_id ON workflow_run_history(user_id);
+
+  -- Workflow Templates Marketplace
+  CREATE TABLE IF NOT EXISTS workflow_templates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT NOT NULL,
+    description TEXT,
+    category TEXT NOT NULL DEFAULT 'general',
+    tags TEXT DEFAULT '[]',
+    nodes_json TEXT NOT NULL,
+    edges_json TEXT NOT NULL DEFAULT '[]',
+    author TEXT DEFAULT 'system',
+    uses INTEGER NOT NULL DEFAULT 0,
+    rating REAL NOT NULL DEFAULT 0,
+    ratings_count INTEGER NOT NULL DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+
+  -- Multi-Model Arena
+  CREATE TABLE IF NOT EXISTS arena_battles (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    prompt TEXT NOT NULL,
+    providers TEXT NOT NULL,
+    responses TEXT NOT NULL DEFAULT '{}',
+    winner TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+  CREATE INDEX IF NOT EXISTS idx_arena_user ON arena_battles(user_id);
+
+  -- Persistent Memory / Knowledge Base
+  CREATE TABLE IF NOT EXISTS memory (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    key TEXT NOT NULL,
+    value TEXT NOT NULL,
+    category TEXT NOT NULL DEFAULT 'general',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+  CREATE INDEX IF NOT EXISTS idx_memory_user ON memory(user_id);
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_user_key ON memory(user_id, key);
+
+  -- Cost Tracker
+  CREATE TABLE IF NOT EXISTS usage_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    provider TEXT NOT NULL,
+    model TEXT,
+    input_tokens INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    estimated_cost REAL NOT NULL DEFAULT 0,
+    action TEXT DEFAULT 'chat',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+  CREATE INDEX IF NOT EXISTS idx_usage_user_date ON usage_log(user_id, created_at);
+
+  -- Daily Challenges
+  CREATE TABLE IF NOT EXISTS challenges (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT NOT NULL,
+    description TEXT NOT NULL,
+    action TEXT NOT NULL,
+    target INTEGER NOT NULL DEFAULT 1,
+    xp_reward INTEGER NOT NULL DEFAULT 50,
+    category TEXT DEFAULT 'general',
+    is_daily INTEGER NOT NULL DEFAULT 1
+  );
+
+  CREATE TABLE IF NOT EXISTS user_challenges (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    challenge_id INTEGER NOT NULL,
+    progress INTEGER NOT NULL DEFAULT 0,
+    completed INTEGER NOT NULL DEFAULT 0,
+    assigned_date DATE NOT NULL,
+    completed_at DATETIME,
+    FOREIGN KEY (challenge_id) REFERENCES challenges(id) ON DELETE CASCADE
+  );
+  CREATE INDEX IF NOT EXISTS idx_uc_user_date ON user_challenges(user_id, assigned_date);
+
+  -- Workflow Collaboration / Sharing
+  CREATE TABLE IF NOT EXISTS workflow_shares (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    workflow_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    share_token TEXT NOT NULL UNIQUE,
+    is_public INTEGER NOT NULL DEFAULT 0,
+    fork_count INTEGER NOT NULL DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (workflow_id) REFERENCES workflows(id) ON DELETE CASCADE
+  );
+  CREATE INDEX IF NOT EXISTS idx_ws_token ON workflow_shares(share_token);
+
+  -- API Key Vault
+  CREATE TABLE IF NOT EXISTS vault (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    key_name TEXT NOT NULL,
+    encrypted_value TEXT NOT NULL,
+    scope TEXT DEFAULT 'global',
+    description TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(user_id, key_name)
+  );
+  CREATE INDEX IF NOT EXISTS idx_vault_user ON vault(user_id);
+
+  -- Plugins
+  CREATE TABLE IF NOT EXISTS plugins (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    file_path TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    config TEXT DEFAULT '{}',
+    loaded_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
 `);
 
 export default db;

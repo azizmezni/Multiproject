@@ -8,6 +8,13 @@ const XP_REWARDS = {
   qa_passed: 30,
   draft_saved: 10,
   streak_bonus: 15,
+  challenge_completed: 50,
+  arena_battle: 20,
+  memory_added: 10,
+  template_used: 15,
+  workflow_shared: 30,
+  plugin_used: 10,
+  voice_processed: 15,
 };
 
 const LEVELS = [

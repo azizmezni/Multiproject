@@ -14,6 +14,14 @@ import { gamification } from './gamification.js';
 import { qa } from './qa.js';
 import { PROVIDER_REGISTRY } from './providers.js';
 import { scheduler } from './scheduler.js';
+import { templates } from './templates.js';
+import { arena } from './arena.js';
+import { memory } from './memory.js';
+import { costTracker } from './cost-tracker.js';
+import { challenges } from './challenges.js';
+import { vault } from './vault.js';
+import { plugins } from './plugins.js';
+import { collaboration } from './collaboration.js';
 import crypto from 'crypto';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -762,10 +770,18 @@ After the JSON array, add a markdown section starting with "---\\n**Knowledge & 
     const history = sessions.getRecentMessages(session.id);
     const chatMessages = history.map(m => ({ role: m.role, content: m.content }));
 
+    // Inject relevant memories as system context
+    const memoryContext = memory.buildContext(userId, message);
+    if (memoryContext) {
+      chatMessages.unshift({ role: 'system', content: `You are a helpful AI assistant. Here is relevant knowledge about the user:${memoryContext}` });
+    }
+
     try {
       const result = await llm.chat(userId, chatMessages);
       sessions.addMessage(session.id, 'assistant', result.text);
       gamification.addXP(userId, 'message_sent');
+      costTracker.log(userId, result.provider, result.model, message, result.text, 'chat');
+      challenges.trackAction(userId, 'message_sent');
       res.json({ reply: result.text, provider: result.provider, model: result.model, sessionId: session.id });
     } catch (err) {
       res.status(500).json({ error: err.message });
@@ -1111,6 +1127,366 @@ After the JSON array, add a markdown section starting with "---\\n**Knowledge & 
     res.json({ boards: boardResults, workflows: wfResults, drafts: draftResults });
   });
 
+  // ==================== TEMPLATES MARKETPLACE ====================
+  app.get('/api/templates', (req, res) => {
+    const category = req.query.category || null;
+    res.json(templates.list(category));
+  });
+
+  app.get('/api/templates/categories', (req, res) => {
+    res.json(templates.getCategories());
+  });
+
+  app.get('/api/templates/:id', (req, res) => {
+    const tpl = templates.get(parseInt(req.params.id));
+    if (!tpl) return res.status(404).json({ error: 'Template not found' });
+    res.json(tpl);
+  });
+
+  app.post('/api/templates/:id/use', (req, res) => {
+    const userId = getUserId(req);
+    try {
+      const result = templates.useTemplate(parseInt(req.params.id), userId);
+      challenges.trackAction(userId, 'template_used');
+      gamification.addXP(userId, 'template_used');
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/templates', (req, res) => {
+    const { workflowId, title, description, category, tags } = req.body;
+    try {
+      const tpl = templates.createFromWorkflow(workflowId, title, description, category, tags);
+      res.json(tpl);
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/templates/:id/rate', (req, res) => {
+    try {
+      const result = templates.rate(parseInt(req.params.id), req.body.score || 5);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get('/api/templates/search/:q', (req, res) => {
+    res.json(templates.search(req.params.q));
+  });
+
+  // ==================== MULTI-MODEL ARENA ====================
+  app.post('/api/arena/battle', async (req, res) => {
+    const userId = getUserId(req);
+    const { prompt, providers: provs } = req.body;
+    if (!prompt) return res.status(400).json({ error: 'Prompt required' });
+    try {
+      const result = await arena.battle(userId, prompt, provs || []);
+      challenges.trackAction(userId, 'arena_battle');
+      gamification.addXP(userId, 'arena_battle');
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/arena/:id/vote', (req, res) => {
+    try {
+      const result = arena.vote(parseInt(req.params.id), req.body.winner);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get('/api/arena/history', (req, res) => {
+    const userId = getUserId(req);
+    res.json(arena.listByUser(userId));
+  });
+
+  app.get('/api/arena/stats', (req, res) => {
+    const userId = getUserId(req);
+    res.json(arena.getStats(userId));
+  });
+
+  // ==================== PERSISTENT MEMORY ====================
+  app.get('/api/memory', (req, res) => {
+    const userId = getUserId(req);
+    res.json(memory.list(userId, req.query.category));
+  });
+
+  app.post('/api/memory', (req, res) => {
+    const userId = getUserId(req);
+    const { key, value, category } = req.body;
+    if (!key || !value) return res.status(400).json({ error: 'Key and value required' });
+    try {
+      const item = memory.set(userId, key, value, category || 'general');
+      challenges.trackAction(userId, 'memory_added');
+      gamification.addXP(userId, 'memory_added');
+      res.json(item);
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.delete('/api/memory/:id', (req, res) => {
+    const userId = getUserId(req);
+    memory.delete(userId, parseInt(req.params.id));
+    res.json({ ok: true });
+  });
+
+  app.get('/api/memory/search', (req, res) => {
+    const userId = getUserId(req);
+    res.json(memory.search(userId, req.query.q || ''));
+  });
+
+  app.get('/api/memory/categories', (req, res) => {
+    const userId = getUserId(req);
+    res.json(memory.getCategories(userId));
+  });
+
+  app.post('/api/memory/import', (req, res) => {
+    const userId = getUserId(req);
+    try {
+      const count = memory.importMemories(userId, req.body.entries || []);
+      res.json({ imported: count });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get('/api/memory/export', (req, res) => {
+    const userId = getUserId(req);
+    res.json(memory.exportMemories(userId));
+  });
+
+  // ==================== COST TRACKER ====================
+  app.get('/api/costs', (req, res) => {
+    const userId = getUserId(req);
+    const days = parseInt(req.query.days) || 30;
+    res.json(costTracker.getSummary(userId, days));
+  });
+
+  app.get('/api/costs/daily', (req, res) => {
+    const userId = getUserId(req);
+    const days = parseInt(req.query.days) || 7;
+    res.json(costTracker.getDaily(userId, days));
+  });
+
+  app.get('/api/costs/by-action', (req, res) => {
+    const userId = getUserId(req);
+    const days = parseInt(req.query.days) || 30;
+    res.json(costTracker.getByAction(userId, days));
+  });
+
+  app.get('/api/costs/recent', (req, res) => {
+    const userId = getUserId(req);
+    res.json(costTracker.getRecent(userId));
+  });
+
+  // ==================== DAILY CHALLENGES ====================
+  app.get('/api/challenges', (req, res) => {
+    const userId = getUserId(req);
+    res.json(challenges.getDailyChallenges(userId));
+  });
+
+  app.get('/api/challenges/history', (req, res) => {
+    const userId = getUserId(req);
+    res.json(challenges.getHistory(userId));
+  });
+
+  app.get('/api/challenges/streak', (req, res) => {
+    const userId = getUserId(req);
+    res.json(challenges.getStreak(userId));
+  });
+
+  // ==================== WORKFLOW COLLABORATION ====================
+  app.post('/api/workflows/:id/share', (req, res) => {
+    const userId = getUserId(req);
+    try {
+      const share = collaboration.share(parseInt(req.params.id), userId, req.body.isPublic || false);
+      gamification.addXP(userId, 'workflow_shared');
+      res.json(share);
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.delete('/api/workflows/:id/share', (req, res) => {
+    const userId = getUserId(req);
+    collaboration.unshare(parseInt(req.params.id), userId);
+    res.json({ ok: true });
+  });
+
+  app.get('/api/shared/:token', (req, res) => {
+    const data = collaboration.getByToken(req.params.token);
+    if (!data) return res.status(404).json({ error: 'Not found' });
+    res.json(data);
+  });
+
+  app.post('/api/shared/:token/fork', (req, res) => {
+    const userId = getUserId(req);
+    try {
+      const result = collaboration.fork(req.params.token, userId);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get('/api/shared', (req, res) => {
+    res.json(collaboration.listPublic());
+  });
+
+  app.get('/api/my-shares', (req, res) => {
+    const userId = getUserId(req);
+    res.json(collaboration.listByUser(userId));
+  });
+
+  // ==================== API KEY VAULT ====================
+  app.get('/api/vault', (req, res) => {
+    const userId = getUserId(req);
+    res.json(vault.list(userId, req.query.scope));
+  });
+
+  app.post('/api/vault', (req, res) => {
+    const userId = getUserId(req);
+    const { keyName, value, scope, description } = req.body;
+    if (!keyName || !value) return res.status(400).json({ error: 'keyName and value required' });
+    try {
+      const item = vault.set(userId, keyName, value, scope || 'global', description || '');
+      res.json(item);
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.delete('/api/vault/:id', (req, res) => {
+    const userId = getUserId(req);
+    vault.delete(userId, parseInt(req.params.id));
+    res.json({ ok: true });
+  });
+
+  // ==================== PLUGINS ====================
+  app.get('/api/plugins', (req, res) => {
+    res.json(plugins.list());
+  });
+
+  app.post('/api/plugins/scan', async (req, res) => {
+    try {
+      const results = await plugins.scan();
+      res.json(results);
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.put('/api/plugins/:id/toggle', (req, res) => {
+    try {
+      const result = plugins.toggle(parseInt(req.params.id));
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/plugins/:name/reload', async (req, res) => {
+    try {
+      const result = await plugins.reload(req.params.name);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get('/api/plugin-node-types', (req, res) => {
+    res.json(plugins.getNodeTypes());
+  });
+
+  // ==================== WORKFLOW DEBUGGER ====================
+  app.post('/api/workflows/:id/debug', async (req, res) => {
+    const userId = getUserId(req);
+    const workflowId = parseInt(req.params.id);
+    const { breakpoints, stepMode } = req.body;
+    const breakpointSet = new Set(breakpoints || []);
+
+    // SSE for debug events
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.flushHeaders();
+
+    const send = (event, data) => {
+      res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    };
+
+    try {
+      const nodeResults = await workflows.executeWorkflow(userId, workflowId, async (node, status, result) => {
+        send('node', { nodeId: node.id, name: node.name, type: node.node_type, status, result: result ? JSON.stringify(result).substring(0, 1000) : null });
+
+        // If breakpoint hit, pause (simulate by waiting)
+        if (breakpointSet.has(node.id) && status === 'running') {
+          send('breakpoint', { nodeId: node.id, name: node.name, inputData: result });
+        }
+      });
+
+      const passed = nodeResults.filter(r => r.status === 'done').length;
+      const failed = nodeResults.filter(r => r.status === 'error').length;
+      send('complete', { nodeCount: nodeResults.length, passed, failed, results: nodeResults.map(r => ({ nodeId: r.id, name: r.name, status: r.status })) });
+    } catch (err) {
+      send('error', { message: err.message });
+    }
+    res.end();
+  });
+
+  // ==================== LEADERBOARD ====================
+  app.get('/api/leaderboard', (req, res) => {
+    const type = req.query.type || 'speed';
+
+    if (type === 'speed') {
+      // Fastest workflow executions
+      const rows = db.prepare(`
+        SELECT w.title, wrh.workflow_id,
+          ROUND((julianday(wrh.finished_at) - julianday(wrh.started_at)) * 86400, 1) as duration_sec,
+          wrh.passed_count, wrh.node_count
+        FROM workflow_run_history wrh JOIN workflows w ON wrh.workflow_id = w.id
+        WHERE wrh.status = 'done' AND wrh.finished_at IS NOT NULL
+        ORDER BY duration_sec ASC LIMIT 20
+      `).all();
+      return res.json({ type: 'speed', entries: rows });
+    }
+
+    if (type === 'reliability') {
+      // Most reliable workflows (highest pass rate)
+      const rows = db.prepare(`
+        SELECT w.title, wrh.workflow_id,
+          COUNT(*) as total_runs,
+          SUM(CASE WHEN wrh.status = 'done' THEN 1 ELSE 0 END) as successful,
+          ROUND(SUM(CASE WHEN wrh.status = 'done' THEN 1.0 ELSE 0.0 END) / COUNT(*) * 100, 1) as success_rate
+        FROM workflow_run_history wrh JOIN workflows w ON wrh.workflow_id = w.id
+        GROUP BY wrh.workflow_id HAVING total_runs >= 2
+        ORDER BY success_rate DESC, total_runs DESC LIMIT 20
+      `).all();
+      return res.json({ type: 'reliability', entries: rows });
+    }
+
+    if (type === 'popular') {
+      // Most-used workflows
+      const rows = db.prepare(`
+        SELECT w.title, wrh.workflow_id, COUNT(*) as total_runs,
+          MAX(wrh.started_at) as last_run
+        FROM workflow_run_history wrh JOIN workflows w ON wrh.workflow_id = w.id
+        GROUP BY wrh.workflow_id ORDER BY total_runs DESC LIMIT 20
+      `).all();
+      return res.json({ type: 'popular', entries: rows });
+    }
+
+    res.json({ type, entries: [] });
+  });
+
   // SPA fallback — don't catch API routes
   app.get('*', (req, res) => {
     if (req.path.startsWith('/api/')) {
@@ -1119,7 +1495,10 @@ After the JSON array, add a markdown section starting with "---\\n**Knowledge & 
     res.sendFile(join(__dirname, 'public', 'index.html'));
   });
 
-  // Start the scheduler
+  // Seed defaults and start scheduler
+  templates.seedDefaults();
+  challenges.seedDefaults();
+  plugins.scan().catch(err => console.log('Plugin scan:', err.message));
   scheduler.start();
 
   return new Promise((resolve) => {

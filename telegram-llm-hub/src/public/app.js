@@ -86,7 +86,7 @@ function showSection(name) {
   state.activeSection = name;
   document.querySelectorAll('.nav-btn').forEach(b => b.classList.toggle('active', b.dataset.section === name));
   const content = document.getElementById('content');
-  const renderers = { home: renderHome, providers: renderProviders, boards: renderBoards, workflows: renderWorkflows, drafts: renderDrafts, projects: renderProjects, chat: renderChat, achievements: renderAchievements };
+  const renderers = { home: renderHome, providers: renderProviders, boards: renderBoards, workflows: renderWorkflows, drafts: renderDrafts, projects: renderProjects, chat: renderChat, achievements: renderAchievements, templates: renderTemplates, arena: renderArena, memory: renderMemory, costs: renderCosts, challenges: renderChallenges, vault: renderVault, plugins: renderPlugins, leaderboard: renderLeaderboard, collaboration: renderCollaboration };
   const fn = renderers[name];
   if (fn) fn(content);
 }
@@ -1700,4 +1700,470 @@ function escapeHtml(text) {
 
 function escapeAttr(text) {
   return String(text == null ? '' : text).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/'/g, '&#39;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/`/g, '&#96;').replace(/\n/g, '&#10;').replace(/\r/g, '&#13;');
+}
+
+// ===================== TEMPLATES MARKETPLACE =====================
+async function renderTemplates(el) {
+  el.innerHTML = '<div class="section-title"><span class="icon">🏪</span> Template Marketplace</div><div style="padding:20px;color:var(--text2)">Loading templates...</div>';
+  try {
+    const [tpls, cats] = await Promise.all([GET('/templates'), GET('/templates/categories')]);
+    const catBtns = ['all', ...cats].map(c => `<button class="btn btn-sm ${c === 'all' ? 'btn-primary' : ''}" onclick="filterTemplates('${escapeAttr(c)}')">${escapeHtml(c)}</button>`).join(' ');
+    const cards = tpls.map(t => {
+      const tags = JSON.parse(t.tags || '[]').map(tag => `<span class="badge badge-blue" style="margin:2px;font-size:10px">${escapeHtml(tag)}</span>`).join('');
+      const stars = t.rating > 0 ? `⭐ ${t.rating.toFixed(1)}` : '';
+      return `<div class="card">
+        <div class="card-header"><div class="card-title">${escapeHtml(t.title)}</div><span class="badge badge-purple">${escapeHtml(t.category)}</span></div>
+        <p style="color:var(--text2);font-size:12px;margin:6px 0">${escapeHtml(t.description || '')}</p>
+        <div style="margin:4px 0">${tags}</div>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px">
+          <span style="font-size:11px;color:var(--text2)">${stars} · ${t.uses} uses</span>
+          <button class="btn btn-sm btn-primary" onclick="useTemplate(${t.id})">⚡ Use</button>
+        </div>
+      </div>`;
+    }).join('');
+    el.innerHTML = `
+      <div class="section-title"><span class="icon">🏪</span> Template Marketplace <span class="badge badge-green">${tpls.length}</span></div>
+      <div class="btn-group" style="margin-bottom:12px">${catBtns}</div>
+      <div class="grid grid-3">${cards || '<div class="empty-state"><div class="empty-icon">🏪</div><h3>No templates yet</h3></div>'}</div>`;
+  } catch (err) {
+    el.innerHTML = `<div class="section-title"><span class="icon">🏪</span> Templates</div><p style="color:var(--pink)">Error: ${escapeHtml(err.message)}</p>`;
+  }
+}
+
+async function filterTemplates(category) {
+  const tpls = await GET(`/templates?category=${encodeURIComponent(category)}`);
+  const grid = document.querySelector('.grid.grid-3');
+  if (!grid) return;
+  grid.innerHTML = tpls.map(t => {
+    const tags = JSON.parse(t.tags || '[]').map(tag => `<span class="badge badge-blue" style="margin:2px;font-size:10px">${escapeHtml(tag)}</span>`).join('');
+    return `<div class="card">
+      <div class="card-header"><div class="card-title">${escapeHtml(t.title)}</div><span class="badge badge-purple">${escapeHtml(t.category)}</span></div>
+      <p style="color:var(--text2);font-size:12px;margin:6px 0">${escapeHtml(t.description || '')}</p>
+      <div style="margin:4px 0">${tags}</div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px">
+        <span style="font-size:11px;color:var(--text2)">${t.rating > 0 ? '⭐ ' + t.rating.toFixed(1) : ''} · ${t.uses} uses</span>
+        <button class="btn btn-sm btn-primary" onclick="useTemplate(${t.id})">⚡ Use</button>
+      </div>
+    </div>`;
+  }).join('') || '<div class="empty-state"><h3>No templates in this category</h3></div>';
+}
+
+async function useTemplate(templateId) {
+  try {
+    const result = await POST(`/templates/${templateId}/use`);
+    showToast('⚡', `Template deployed! Workflow #${result.workflowId} created with ${result.nodeCount} nodes`);
+    await refreshAll();
+    viewWorkflow(result.workflowId);
+  } catch (err) {
+    showToast('❌', err.message);
+  }
+}
+
+// ===================== MULTI-MODEL ARENA =====================
+async function renderArena(el) {
+  const [history, stats] = await Promise.allSettled([GET('/arena/history'), GET('/arena/stats')]);
+  const battles = history.status === 'fulfilled' ? history.value : [];
+  const winStats = stats.status === 'fulfilled' ? stats.value : {};
+
+  const statsCards = Object.entries(winStats).map(([prov, s]) =>
+    `<div class="card" style="text-align:center;padding:12px">
+      <div style="font-size:14px;font-weight:bold;color:var(--cyan)">${escapeHtml(prov)}</div>
+      <div style="font-size:24px;font-weight:bold;color:var(--green)">${s.winRate}%</div>
+      <div style="font-size:11px;color:var(--text2)">${s.wins}/${s.battles} wins</div>
+    </div>`
+  ).join('');
+
+  const recentBattles = battles.slice(0, 5).map(b => {
+    const providers = Object.keys(b.responses);
+    return `<div class="card" style="padding:10px;margin-bottom:8px">
+      <div style="font-size:12px;color:var(--text2);margin-bottom:4px">${escapeHtml(b.prompt.substring(0, 80))}...</div>
+      <div style="display:flex;gap:6px">${providers.map(p =>
+        `<span class="badge ${b.winner === p ? 'badge-green' : ''}">${escapeHtml(p)}${b.winner === p ? ' 👑' : ''}</span>`
+      ).join('')}</div>
+    </div>`;
+  }).join('');
+
+  el.innerHTML = `
+    <div class="section-title"><span class="icon">⚔️</span> Multi-Model Arena</div>
+    <div class="card" style="margin-bottom:16px">
+      <h3 style="margin-bottom:8px">New Battle</h3>
+      <textarea id="arena-prompt" class="input" rows="3" placeholder="Enter a prompt to test across providers..." style="width:100%;margin-bottom:8px"></textarea>
+      <button class="btn btn-primary" onclick="startBattle()">⚔️ Start Battle</button>
+    </div>
+    ${statsCards ? `<div class="section-title" style="font-size:14px">📊 Win Rates</div><div class="grid grid-4" style="margin-bottom:16px">${statsCards}</div>` : ''}
+    ${recentBattles ? `<div class="section-title" style="font-size:14px">🕐 Recent Battles</div>${recentBattles}` : ''}`;
+}
+
+async function startBattle() {
+  const prompt = document.getElementById('arena-prompt')?.value?.trim();
+  if (!prompt) return showToast('⚠️', 'Enter a prompt first');
+  showToast('⚔️', 'Battle starting...');
+  try {
+    const result = await POST('/arena/battle', { prompt });
+    showArenaBattle(result);
+  } catch (err) {
+    showToast('❌', err.message);
+  }
+}
+
+function showArenaBattle(battle) {
+  const responses = Object.entries(battle.responses);
+  const cards = responses.map(([prov, r]) => `
+    <div class="card arena-response" style="flex:1;min-width:250px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <span style="font-weight:bold;color:var(--cyan)">${escapeHtml(prov)}</span>
+        <span style="font-size:11px;color:var(--text2)">${r.latency || 0}ms${r.model ? ' · ' + escapeHtml(r.model) : ''}</span>
+      </div>
+      <div style="font-size:13px;color:var(--text1);white-space:pre-wrap;max-height:300px;overflow:auto">${r.error ? `<span style="color:var(--pink)">Error: ${escapeHtml(r.error)}</span>` : escapeHtml(r.reply || '')}</div>
+      ${!r.error ? `<button class="btn btn-sm btn-primary" style="margin-top:8px" onclick="voteBattle(${battle.id},'${escapeAttr(prov)}')">👑 Vote Best</button>` : ''}
+    </div>
+  `).join('');
+
+  showWideModal('⚔️ Arena Battle', `
+    <div style="background:var(--bg2);padding:8px;border-radius:6px;margin-bottom:12px;font-size:12px;color:var(--text2)"><strong>Prompt:</strong> ${escapeHtml(battle.prompt)}</div>
+    <div style="display:flex;gap:12px;flex-wrap:wrap">${cards}</div>
+  `);
+}
+
+async function voteBattle(battleId, winner) {
+  await POST(`/arena/${battleId}/vote`, { winner });
+  closeModal();
+  showToast('👑', `Voted for ${winner}!`);
+  renderArena(document.getElementById('content'));
+}
+
+// ===================== PERSISTENT MEMORY =====================
+async function renderMemory(el) {
+  try {
+    const items = await GET('/memory');
+    const cards = items.map(m => `
+      <div class="card" style="padding:10px">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <span style="font-weight:bold;color:var(--cyan);font-size:13px">${escapeHtml(m.key)}</span>
+          <span class="badge badge-purple" style="font-size:10px">${escapeHtml(m.category)}</span>
+        </div>
+        <p style="font-size:12px;color:var(--text2);margin:6px 0;white-space:pre-wrap">${escapeHtml(m.value)}</p>
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <span style="font-size:10px;color:var(--text2)">${new Date(m.updated_at).toLocaleDateString()}</span>
+          <button class="btn btn-sm btn-danger" onclick="deleteMemory(${m.id})">🗑</button>
+        </div>
+      </div>
+    `).join('');
+
+    el.innerHTML = `
+      <div class="section-title"><span class="icon">🧠</span> Knowledge Base <span class="badge badge-green">${items.length}</span></div>
+      <div class="card" style="margin-bottom:16px;padding:12px">
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <input class="input" id="mem-key" placeholder="Key (e.g. 'my stack')" style="flex:1;min-width:150px">
+          <input class="input" id="mem-category" placeholder="Category" style="width:120px" value="general">
+        </div>
+        <textarea id="mem-value" class="input" rows="2" placeholder="Value (e.g. 'Python + FastAPI + Uvicorn')" style="width:100%;margin-top:6px"></textarea>
+        <button class="btn btn-sm btn-primary" style="margin-top:6px" onclick="addMemory()">💾 Save</button>
+      </div>
+      <div class="grid grid-2">${cards || '<div class="empty-state"><div class="empty-icon">🧠</div><h3>No memories yet</h3><p>Add knowledge the AI will remember across chats</p></div>'}</div>`;
+  } catch (err) {
+    el.innerHTML = `<p style="color:var(--pink)">Error: ${escapeHtml(err.message)}</p>`;
+  }
+}
+
+async function addMemory() {
+  const key = document.getElementById('mem-key')?.value?.trim();
+  const value = document.getElementById('mem-value')?.value?.trim();
+  const category = document.getElementById('mem-category')?.value?.trim() || 'general';
+  if (!key || !value) return showToast('⚠️', 'Key and value required');
+  await POST('/memory', { key, value, category });
+  showToast('🧠', 'Memory saved!');
+  renderMemory(document.getElementById('content'));
+}
+
+async function deleteMemory(id) {
+  if (!confirm('Delete this memory?')) return;
+  await DEL(`/memory/${id}`);
+  renderMemory(document.getElementById('content'));
+}
+
+// ===================== COST TRACKER =====================
+async function renderCosts(el) {
+  try {
+    const [summary, daily, byAction] = await Promise.all([
+      GET('/costs?days=30'), GET('/costs/daily?days=7'), GET('/costs/by-action?days=30')
+    ]);
+
+    const totalCost = summary.totals?.total_cost || 0;
+    const totalReqs = summary.totals?.request_count || 0;
+    const totalTokens = (summary.totals?.total_input || 0) + (summary.totals?.total_output || 0);
+
+    const breakdownRows = (summary.breakdown || []).map(r => `
+      <tr>
+        <td>${escapeHtml(r.provider)}</td><td>${escapeHtml(r.model || '')}</td>
+        <td>${r.request_count}</td><td>${(r.total_input + r.total_output).toLocaleString()}</td>
+        <td style="color:var(--green)">$${r.total_cost.toFixed(4)}</td>
+      </tr>`).join('');
+
+    const dailyRows = daily.map(d => `
+      <tr><td>${d.date}</td><td>${escapeHtml(d.provider)}</td><td>${d.requests}</td>
+      <td>${(d.input_tokens + d.output_tokens).toLocaleString()}</td>
+      <td style="color:var(--green)">$${d.cost.toFixed(4)}</td></tr>`).join('');
+
+    const actionRows = (byAction || []).map(a => `
+      <tr><td>${escapeHtml(a.action)}</td><td>${a.count}</td>
+      <td>${(a.input_tokens + a.output_tokens).toLocaleString()}</td>
+      <td style="color:var(--green)">$${a.total_cost.toFixed(4)}</td></tr>`).join('');
+
+    el.innerHTML = `
+      <div class="section-title"><span class="icon">💰</span> Cost Tracker</div>
+      <div class="grid grid-3" style="margin-bottom:16px">
+        <div class="card stat-card"><div class="stat-value" style="color:var(--green)">$${totalCost.toFixed(4)}</div><div class="stat-label">30-Day Cost</div></div>
+        <div class="card stat-card"><div class="stat-value">${totalReqs}</div><div class="stat-label">Requests</div></div>
+        <div class="card stat-card"><div class="stat-value">${totalTokens.toLocaleString()}</div><div class="stat-label">Tokens</div></div>
+      </div>
+      <div class="card" style="margin-bottom:12px"><h3 style="margin-bottom:8px">Provider Breakdown</h3>
+        <table class="data-table"><thead><tr><th>Provider</th><th>Model</th><th>Requests</th><th>Tokens</th><th>Cost</th></tr></thead><tbody>${breakdownRows || '<tr><td colspan="5" style="text-align:center;color:var(--text2)">No usage data yet</td></tr>'}</tbody></table>
+      </div>
+      <div class="grid grid-2">
+        <div class="card"><h3 style="margin-bottom:8px">Daily (7d)</h3>
+          <table class="data-table"><thead><tr><th>Date</th><th>Provider</th><th>Reqs</th><th>Tokens</th><th>Cost</th></tr></thead><tbody>${dailyRows || '<tr><td colspan="5" style="text-align:center;color:var(--text2)">No data</td></tr>'}</tbody></table>
+        </div>
+        <div class="card"><h3 style="margin-bottom:8px">By Action</h3>
+          <table class="data-table"><thead><tr><th>Action</th><th>Count</th><th>Tokens</th><th>Cost</th></tr></thead><tbody>${actionRows || '<tr><td colspan="4" style="text-align:center;color:var(--text2)">No data</td></tr>'}</tbody></table>
+        </div>
+      </div>`;
+  } catch (err) {
+    el.innerHTML = `<p style="color:var(--pink)">Error: ${escapeHtml(err.message)}</p>`;
+  }
+}
+
+// ===================== DAILY CHALLENGES =====================
+async function renderChallenges(el) {
+  try {
+    const [daily, streak] = await Promise.all([GET('/challenges'), GET('/challenges/streak')]);
+    const challengeCards = daily.map(c => {
+      const pct = Math.min(100, Math.round((c.progress / c.target) * 100));
+      const done = c.completed;
+      return `<div class="card challenge-card ${done ? 'completed' : ''}">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+          <span style="font-weight:bold;font-size:14px;color:${done ? 'var(--green)' : 'var(--text1)'}">${done ? '✅ ' : ''}${escapeHtml(c.title)}</span>
+          <span class="badge ${done ? 'badge-green' : 'badge-orange'}">+${c.xp_reward} XP</span>
+        </div>
+        <p style="font-size:12px;color:var(--text2);margin-bottom:8px">${escapeHtml(c.description)}</p>
+        <div class="progress-bar"><div class="progress-fill" style="width:${pct}%;background:${done ? 'var(--green)' : 'var(--cyan)'}"></div></div>
+        <div style="font-size:11px;color:var(--text2);margin-top:4px">${c.progress}/${c.target} ${done ? '— Complete!' : ''}</div>
+      </div>`;
+    }).join('');
+
+    el.innerHTML = `
+      <div class="section-title"><span class="icon">🎯</span> Daily Challenges</div>
+      <div class="card" style="margin-bottom:16px;text-align:center;padding:16px">
+        <div style="font-size:32px">🔥</div>
+        <div style="font-size:24px;font-weight:bold;color:var(--orange)">${streak.streak}-Day Streak</div>
+        <div style="font-size:12px;color:var(--text2)">${streak.totalCompleted} total challenges completed</div>
+      </div>
+      <div class="grid grid-3">${challengeCards}</div>`;
+  } catch (err) {
+    el.innerHTML = `<p style="color:var(--pink)">Error: ${escapeHtml(err.message)}</p>`;
+  }
+}
+
+// ===================== API KEY VAULT =====================
+async function renderVault(el) {
+  try {
+    const items = await GET('/vault');
+    const rows = items.map(v => `
+      <tr>
+        <td style="font-weight:bold;color:var(--cyan)">${escapeHtml(v.key_name)}</td>
+        <td><span class="badge badge-purple">${escapeHtml(v.scope)}</span></td>
+        <td style="font-size:12px;color:var(--text2)">${escapeHtml(v.description || '-')}</td>
+        <td style="color:var(--text2)">••••••••</td>
+        <td><button class="btn btn-sm btn-danger" onclick="deleteVaultKey(${v.id})">🗑</button></td>
+      </tr>
+    `).join('');
+
+    el.innerHTML = `
+      <div class="section-title"><span class="icon">🔐</span> API Key Vault <span class="badge badge-green">${items.length}</span></div>
+      <div class="card" style="margin-bottom:16px;padding:12px">
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:6px">
+          <input class="input" id="vault-name" placeholder="Key name (e.g. GITHUB_TOKEN)" style="flex:1;min-width:150px">
+          <input class="input" id="vault-scope" placeholder="Scope" style="width:120px" value="global">
+          <input class="input" id="vault-desc" placeholder="Description" style="flex:1;min-width:150px">
+        </div>
+        <div style="display:flex;gap:8px">
+          <input class="input" id="vault-value" type="password" placeholder="Secret value" style="flex:1">
+          <button class="btn btn-primary" onclick="addVaultKey()">🔐 Store</button>
+        </div>
+      </div>
+      <div class="card"><table class="data-table">
+        <thead><tr><th>Name</th><th>Scope</th><th>Description</th><th>Value</th><th></th></tr></thead>
+        <tbody>${rows || '<tr><td colspan="5" style="text-align:center;color:var(--text2)">No keys stored</td></tr>'}</tbody>
+      </table></div>`;
+  } catch (err) {
+    el.innerHTML = `<p style="color:var(--pink)">Error: ${escapeHtml(err.message)}</p>`;
+  }
+}
+
+async function addVaultKey() {
+  const keyName = document.getElementById('vault-name')?.value?.trim();
+  const value = document.getElementById('vault-value')?.value;
+  const scope = document.getElementById('vault-scope')?.value?.trim() || 'global';
+  const description = document.getElementById('vault-desc')?.value?.trim();
+  if (!keyName || !value) return showToast('⚠️', 'Name and value required');
+  await POST('/vault', { keyName, value, scope, description });
+  showToast('🔐', 'Secret stored!');
+  renderVault(document.getElementById('content'));
+}
+
+async function deleteVaultKey(id) {
+  if (!confirm('Delete this vault key?')) return;
+  await DEL(`/vault/${id}`);
+  renderVault(document.getElementById('content'));
+}
+
+// ===================== PLUGINS =====================
+async function renderPlugins(el) {
+  try {
+    const items = await GET('/plugins');
+    const cards = items.map(p => {
+      const config = p.config || {};
+      return `<div class="card" style="padding:12px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+          <span style="font-weight:bold;font-size:14px">${config.emoji || '🔌'} ${escapeHtml(p.name)}</span>
+          <span class="badge ${p.enabled ? 'badge-green' : ''}">${p.enabled ? 'Active' : 'Disabled'}</span>
+        </div>
+        <p style="font-size:12px;color:var(--text2);margin-bottom:8px">${escapeHtml(config.desc || p.file_path)}</p>
+        <div class="btn-group">
+          <button class="btn btn-sm" onclick="togglePlugin(${p.id})">${p.enabled ? '⏸ Disable' : '▶ Enable'}</button>
+          <button class="btn btn-sm" onclick="reloadPlugin('${escapeAttr(p.name)}')">🔄 Reload</button>
+        </div>
+      </div>`;
+    }).join('');
+
+    el.innerHTML = `
+      <div class="section-title"><span class="icon">🔌</span> Plugins <span class="badge badge-green">${items.length}</span></div>
+      <div style="margin-bottom:12px">
+        <button class="btn btn-primary btn-sm" onclick="scanPlugins()">🔍 Scan Plugins</button>
+        <span style="font-size:11px;color:var(--text2);margin-left:8px">Drop .js files in /plugins/ folder</span>
+      </div>
+      <div class="grid grid-3">${cards || '<div class="empty-state"><div class="empty-icon">🔌</div><h3>No plugins</h3><p>Click Scan to discover plugins</p></div>'}</div>`;
+  } catch (err) {
+    el.innerHTML = `<p style="color:var(--pink)">Error: ${escapeHtml(err.message)}</p>`;
+  }
+}
+
+async function scanPlugins() {
+  showToast('🔍', 'Scanning plugins...');
+  const results = await POST('/plugins/scan');
+  showToast('🔌', `Found ${results.length} plugin(s)`);
+  renderPlugins(document.getElementById('content'));
+}
+
+async function togglePlugin(id) {
+  await PUT(`/plugins/${id}/toggle`);
+  renderPlugins(document.getElementById('content'));
+}
+
+async function reloadPlugin(name) {
+  await POST(`/plugins/${name}/reload`);
+  showToast('🔄', `Plugin ${name} reloaded`);
+}
+
+// ===================== LEADERBOARD =====================
+async function renderLeaderboard(el) {
+  try {
+    const [speed, reliability, popular] = await Promise.all([
+      GET('/leaderboard?type=speed'), GET('/leaderboard?type=reliability'), GET('/leaderboard?type=popular')
+    ]);
+
+    const renderTable = (data, cols) => {
+      if (!data.entries?.length) return '<p style="color:var(--text2);text-align:center">No data yet</p>';
+      return `<table class="data-table"><thead><tr>${cols.map(c => `<th>${c.label}</th>`).join('')}</tr></thead><tbody>${
+        data.entries.map((r, i) => `<tr>${cols.map(c => `<td>${c.render(r, i)}</td>`).join('')}</tr>`).join('')
+      }</tbody></table>`;
+    };
+
+    el.innerHTML = `
+      <div class="section-title"><span class="icon">🏆</span> Workflow Leaderboard</div>
+      <div class="grid grid-3">
+        <div class="card"><h3 style="margin-bottom:8px">⚡ Fastest</h3>${renderTable(speed, [
+          { label: '#', render: (r, i) => `<span style="color:var(--gold)">${i + 1}</span>` },
+          { label: 'Workflow', render: r => escapeHtml(r.title) },
+          { label: 'Time', render: r => `<span style="color:var(--green)">${r.duration_sec}s</span>` },
+          { label: 'Nodes', render: r => r.node_count },
+        ])}</div>
+        <div class="card"><h3 style="margin-bottom:8px">🛡 Most Reliable</h3>${renderTable(reliability, [
+          { label: '#', render: (r, i) => `<span style="color:var(--gold)">${i + 1}</span>` },
+          { label: 'Workflow', render: r => escapeHtml(r.title) },
+          { label: 'Rate', render: r => `<span style="color:var(--green)">${r.success_rate}%</span>` },
+          { label: 'Runs', render: r => r.total_runs },
+        ])}</div>
+        <div class="card"><h3 style="margin-bottom:8px">🔥 Most Used</h3>${renderTable(popular, [
+          { label: '#', render: (r, i) => `<span style="color:var(--gold)">${i + 1}</span>` },
+          { label: 'Workflow', render: r => escapeHtml(r.title) },
+          { label: 'Runs', render: r => `<span style="color:var(--cyan)">${r.total_runs}</span>` },
+        ])}</div>
+      </div>`;
+  } catch (err) {
+    el.innerHTML = `<p style="color:var(--pink)">Error: ${escapeHtml(err.message)}</p>`;
+  }
+}
+
+// ===================== COLLABORATION =====================
+async function renderCollaboration(el) {
+  try {
+    const [shared, publicWf] = await Promise.all([GET('/my-shares'), GET('/shared')]);
+    const myShares = shared.map(s => `
+      <div class="card" style="padding:10px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+          <span style="font-weight:bold;color:var(--cyan)">${escapeHtml(s.title)}</span>
+          <span class="badge ${s.is_public ? 'badge-green' : ''}">${s.is_public ? 'Public' : 'Private'}</span>
+        </div>
+        <div style="font-size:11px;color:var(--text2);margin-bottom:6px">
+          Token: <code style="background:var(--bg);padding:2px 6px;border-radius:4px">${escapeHtml(s.share_token)}</code>
+          · ${s.fork_count} forks
+        </div>
+        <button class="btn btn-sm btn-danger" onclick="unshareWorkflow(${s.workflow_id})">🗑 Unshare</button>
+      </div>`).join('');
+
+    const publicCards = publicWf.map(s => `
+      <div class="card" style="padding:10px">
+        <div style="font-weight:bold;color:var(--text1);margin-bottom:4px">${escapeHtml(s.title)}</div>
+        <div style="font-size:11px;color:var(--text2);margin-bottom:6px">${escapeHtml(s.description || 'No description')} · ${s.node_count || '?'} nodes · ${s.fork_count} forks</div>
+        <button class="btn btn-sm btn-primary" onclick="forkWorkflow('${escapeAttr(s.share_token)}')">🍴 Fork</button>
+      </div>`).join('');
+
+    el.innerHTML = `
+      <div class="section-title"><span class="icon">🤝</span> Collaboration</div>
+      <div class="card" style="margin-bottom:16px;padding:12px">
+        <h3 style="margin-bottom:8px">Import Shared Workflow</h3>
+        <div style="display:flex;gap:8px">
+          <input class="input" id="fork-token" placeholder="Paste share token..." style="flex:1">
+          <button class="btn btn-primary" onclick="forkWorkflow(document.getElementById('fork-token').value.trim())">🍴 Fork</button>
+        </div>
+      </div>
+      ${myShares ? `<div class="section-title" style="font-size:14px">📤 My Shared Workflows</div><div class="grid grid-2" style="margin-bottom:16px">${myShares}</div>` : ''}
+      ${publicCards ? `<div class="section-title" style="font-size:14px">🌍 Public Gallery</div><div class="grid grid-3">${publicCards}</div>` : '<div class="empty-state"><h3>No public workflows yet</h3></div>'}`;
+  } catch (err) {
+    el.innerHTML = `<p style="color:var(--pink)">Error: ${escapeHtml(err.message)}</p>`;
+  }
+}
+
+async function shareWorkflow(workflowId, isPublic = false) {
+  try {
+    const result = await POST(`/workflows/${workflowId}/share`, { isPublic });
+    showToast('🔗', `Share token: ${result.share_token}`);
+    return result;
+  } catch (err) { showToast('❌', err.message); }
+}
+
+async function unshareWorkflow(workflowId) {
+  if (!confirm('Remove sharing?')) return;
+  await DEL(`/workflows/${workflowId}/share`);
+  renderCollaboration(document.getElementById('content'));
+}
+
+async function forkWorkflow(token) {
+  if (!token) return showToast('⚠️', 'Enter a share token');
+  try {
+    const result = await POST(`/shared/${token}/fork`);
+    showToast('🍴', `Forked! Workflow #${result.workflowId} created`);
+    await refreshAll();
+  } catch (err) { showToast('❌', err.message); }
 }

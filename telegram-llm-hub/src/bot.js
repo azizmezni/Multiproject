@@ -8,6 +8,18 @@ import { qa } from './qa.js';
 import { kb } from './keyboards.js';
 import { PROVIDER_REGISTRY } from './providers.js';
 import { workflows, NODE_TYPES } from './workflows.js';
+import { memory } from './memory.js';
+import { arena } from './arena.js';
+import { challenges } from './challenges.js';
+import { costTracker } from './cost-tracker.js';
+import { gamification } from './gamification.js';
+import https from 'https';
+import http from 'http';
+import { writeFile, unlink } from 'fs/promises';
+import { join, dirname } from 'path';
+import { fileURLToPath } from 'url';
+
+const __botDirname = dirname(fileURLToPath(import.meta.url));
 
 // Strip all Telegram Markdown special chars so it never fails
 function stripMd(text) {
@@ -2737,6 +2749,237 @@ IMPORTANT:
     buttons.push([{ text: '\u25c0\ufe0f Back', callback_data: 'main_menu' }]);
     return { reply_markup: { inline_keyboard: buttons } };
   }
+
+  // ============================================================
+  // INLINE MODE — Use bot in any chat: @botname <query>
+  // ============================================================
+  bot.on('inline_query', async (ctx) => {
+    const query = ctx.inlineQuery.query.trim();
+    const userId = ctx.from.id;
+    if (!query) return ctx.answerInlineQuery([]);
+
+    llm.initDefaults(userId);
+    const results = [];
+
+    try {
+      // Quick LLM response
+      const response = await llm.chat(userId, [{ role: 'user', content: query }]);
+      const text = response.text || 'No response';
+      results.push({
+        type: 'article',
+        id: 'llm-' + Date.now(),
+        title: `💡 AI: ${text.substring(0, 50)}...`,
+        description: text.substring(0, 100),
+        input_message_content: { message_text: text.substring(0, 4096) },
+      });
+    } catch {}
+
+    // Search boards
+    const userBoards = boards.listByUser(userId).filter(b => b.title.toLowerCase().includes(query.toLowerCase())).slice(0, 3);
+    for (const b of userBoards) {
+      results.push({
+        type: 'article',
+        id: `board-${b.id}`,
+        title: `📋 Board: ${b.title}`,
+        description: b.description || `Status: ${b.status}`,
+        input_message_content: { message_text: `📋 *${b.title}*\nStatus: ${b.status}\n${b.description || ''}` },
+      });
+    }
+
+    // Search workflows
+    const userWf = workflows.listByUser(userId).filter(w => w.title.toLowerCase().includes(query.toLowerCase())).slice(0, 3);
+    for (const w of userWf) {
+      results.push({
+        type: 'article',
+        id: `wf-${w.id}`,
+        title: `🔀 Workflow: ${w.title}`,
+        description: w.description || `Status: ${w.status}`,
+        input_message_content: { message_text: `🔀 *${w.title}*\nStatus: ${w.status}\n${w.description || ''}` },
+      });
+    }
+
+    await ctx.answerInlineQuery(results.slice(0, 10), { cache_time: 10 });
+  });
+
+  // ============================================================
+  // VOICE NOTES — Transcribe + Process with LLM
+  // ============================================================
+  bot.on('voice', async (ctx) => {
+    const userId = ctx.from.id;
+    llm.initDefaults(userId);
+    await ctx.reply('🎙 Processing voice message...');
+
+    try {
+      // Download voice file
+      const file = await ctx.telegram.getFile(ctx.message.voice.file_id);
+      const fileUrl = `https://api.telegram.org/file/bot${bot.telegram.token}/${file.file_path}`;
+
+      // Download to temp file
+      const tempPath = join(__botDirname, '..', `temp_voice_${userId}.ogg`);
+      await new Promise((resolve, reject) => {
+        const proto = fileUrl.startsWith('https') ? https : http;
+        proto.get(fileUrl, (res) => {
+          const chunks = [];
+          res.on('data', chunk => chunks.push(chunk));
+          res.on('end', async () => {
+            await writeFile(tempPath, Buffer.concat(chunks));
+            resolve();
+          });
+          res.on('error', reject);
+        }).on('error', reject);
+      });
+
+      // Try to transcribe using Whisper-compatible API
+      let transcript = '';
+      const providers = llm.getEnabledProviders(userId);
+      const openaiProv = providers.find(p => p.name === 'openai');
+
+      if (openaiProv && openaiProv.api_key) {
+        // Use OpenAI Whisper
+        const { readFile: readF } = await import('fs/promises');
+        const audioData = await readF(tempPath);
+        const boundary = '----FormBoundary' + Date.now();
+        const body = Buffer.concat([
+          Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="audio.ogg"\r\nContent-Type: audio/ogg\r\n\r\n`),
+          audioData,
+          Buffer.from(`\r\n--${boundary}\r\nContent-Disposition: form-data; name="model"\r\n\r\nwhisper-1\r\n--${boundary}--\r\n`),
+        ]);
+
+        const result = await fetch('https://api.openai.com/v1/audio/transcriptions', {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${openaiProv.api_key}`, 'Content-Type': `multipart/form-data; boundary=${boundary}` },
+          body,
+        });
+        const data = await result.json();
+        transcript = data.text || '';
+      } else {
+        // Fallback: inform user
+        transcript = '[Voice transcription requires OpenAI API key for Whisper]';
+      }
+
+      // Cleanup temp file
+      try { await unlink(tempPath); } catch {}
+
+      if (!transcript || transcript.startsWith('[')) {
+        return await safeSend(ctx, `🎙 ${transcript || 'Could not transcribe audio'}`);
+      }
+
+      // Process with LLM
+      const response = await llm.chat(userId, [
+        { role: 'system', content: 'The user sent a voice message. Here is the transcript. Respond helpfully.' },
+        { role: 'user', content: transcript },
+      ]);
+
+      // Track cost
+      costTracker.log(userId, response.provider, response.model, transcript, response.text, 'voice');
+      gamification.addXP(userId, 'voice_processed');
+      challenges.trackAction(userId, 'message_sent');
+
+      await safeSend(ctx, `🎙 *Transcript:*\n${transcript}\n\n💡 *Response:*\n${response.text}`);
+    } catch (err) {
+      await ctx.reply(`❌ Voice processing error: ${err.message}`);
+    }
+  });
+
+  // ============================================================
+  // NEW COMMANDS — Memory, Arena, Challenges
+  // ============================================================
+
+  // /remember <key> = <value> — Save to knowledge base
+  bot.command('remember', async (ctx) => {
+    const userId = ctx.from.id;
+    const text = ctx.message.text.replace('/remember', '').trim();
+    const eqIndex = text.indexOf('=');
+    if (eqIndex === -1) {
+      return await safeSend(ctx, '📝 Usage: `/remember key = value`\nExample: `/remember my stack = Python + FastAPI`');
+    }
+    const key = text.substring(0, eqIndex).trim();
+    const value = text.substring(eqIndex + 1).trim();
+    if (!key || !value) return await safeSend(ctx, '❌ Both key and value are required');
+
+    memory.set(userId, key, value);
+    challenges.trackAction(userId, 'memory_added');
+    await safeSend(ctx, `🧠 Remembered: *${key}*`);
+  });
+
+  // /recall <query> — Search knowledge base
+  bot.command('recall', async (ctx) => {
+    const userId = ctx.from.id;
+    const query = ctx.message.text.replace('/recall', '').trim();
+    if (!query) {
+      const all = memory.list(userId);
+      if (!all.length) return await safeSend(ctx, '🧠 No memories stored. Use `/remember key = value`');
+      const list = all.slice(0, 10).map(m => `• *${m.key}*: ${m.value}`).join('\n');
+      return await safeSend(ctx, `🧠 *Knowledge Base* (${all.length} items)\n\n${list}`);
+    }
+    const results = memory.search(userId, query);
+    if (!results.length) return await safeSend(ctx, `🧠 No memories matching "${query}"`);
+    const list = results.map(m => `• *${m.key}*: ${m.value}`).join('\n');
+    await safeSend(ctx, `🧠 Found ${results.length} match(es):\n\n${list}`);
+  });
+
+  // /arena <prompt> — Start arena battle
+  bot.command('arena', async (ctx) => {
+    const userId = ctx.from.id;
+    const prompt = ctx.message.text.replace('/arena', '').trim();
+    if (!prompt) return await safeSend(ctx, '⚔️ Usage: `/arena <prompt>`\nSends to all enabled providers simultaneously');
+
+    await ctx.reply('⚔️ Arena battle starting...');
+    llm.initDefaults(userId);
+
+    try {
+      const result = await arena.battle(userId, prompt);
+      let response = `⚔️ *Arena Battle*\n_${prompt}_\n\n`;
+      for (const [prov, r] of Object.entries(result.responses)) {
+        response += `*${prov}* (${r.latency || 0}ms):\n${r.error ? `❌ ${r.error}` : (r.reply || '').substring(0, 500)}\n\n`;
+      }
+      response += `Vote with: /vote ${result.id} <provider_name>`;
+      await safeSend(ctx, response);
+    } catch (err) {
+      await ctx.reply(`❌ ${err.message}`);
+    }
+  });
+
+  // /vote <battle_id> <provider> — Vote for arena winner
+  bot.command('vote', async (ctx) => {
+    const parts = ctx.message.text.replace('/vote', '').trim().split(/\s+/);
+    if (parts.length < 2) return await safeSend(ctx, '👑 Usage: `/vote <battle_id> <provider>`');
+    const [battleId, winner] = parts;
+    arena.vote(parseInt(battleId), winner);
+    await safeSend(ctx, `👑 Voted for *${winner}* in battle #${battleId}!`);
+  });
+
+  // /challenges — View daily challenges
+  bot.command('challenges', async (ctx) => {
+    const userId = ctx.from.id;
+    const daily = challenges.getDailyChallenges(userId);
+    let msg = '🎯 *Daily Challenges*\n\n';
+    for (const c of daily) {
+      const status = c.completed ? '✅' : `${c.progress}/${c.target}`;
+      msg += `${c.completed ? '✅' : '⬜'} *${c.title}* — ${c.description} [${status}] (+${c.xp_reward}XP)\n`;
+    }
+    const streak = challenges.getStreak(userId);
+    msg += `\n🔥 Streak: ${streak.streak} days`;
+    await safeSend(ctx, msg);
+  });
+
+  // /costs — View usage costs
+  bot.command('costs', async (ctx) => {
+    const userId = ctx.from.id;
+    const summary = costTracker.getSummary(userId, 30);
+    const t = summary.totals;
+    let msg = `💰 *Cost Summary (30 days)*\n\n`;
+    msg += `Total: $${(t?.total_cost || 0).toFixed(4)}\n`;
+    msg += `Requests: ${t?.request_count || 0}\n`;
+    msg += `Tokens: ${((t?.total_input || 0) + (t?.total_output || 0)).toLocaleString()}\n\n`;
+    if (summary.breakdown.length) {
+      msg += '*By Provider:*\n';
+      for (const r of summary.breakdown.slice(0, 5)) {
+        msg += `• ${r.provider} (${r.model}): $${r.total_cost.toFixed(4)} — ${r.request_count} requests\n`;
+      }
+    }
+    await safeSend(ctx, msg);
+  });
 
   return bot;
 }

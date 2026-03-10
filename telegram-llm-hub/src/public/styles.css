@@ -863,4 +863,37 @@ body {
   .modal-wide { min-width: auto; width: 95vw; }
   .node-detail-split { flex-direction: column; }
   .node-detail-left { flex: none; border-right: none; border-bottom: 1px solid var(--border); padding-right: 0; padding-bottom: 16px; }
+  .grid-3 { grid-template-columns: 1fr; }
+  .grid-4 { grid-template-columns: 1fr 1fr; }
 }
+
+/* Nav divider */
+.nav-divider { height: 1px; background: var(--border); margin: 6px 4px; opacity: 0.5; }
+
+/* Data tables */
+.data-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.data-table th { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); color: var(--text2); font-weight: 600; }
+.data-table td { padding: 6px 8px; border-bottom: 1px solid var(--border); color: var(--text1); }
+.data-table tr:hover { background: rgba(0,240,255,0.03); }
+
+/* Grid 3-4 */
+.grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+.grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+
+/* Stat cards */
+.stat-card { text-align: center; padding: 16px; }
+.stat-value { font-size: 28px; font-weight: 800; color: var(--cyan); }
+.stat-label { font-size: 12px; color: var(--text2); margin-top: 4px; }
+
+/* Challenge cards */
+.challenge-card { transition: all 0.3s; }
+.challenge-card.completed { border-color: var(--green); opacity: 0.8; }
+
+/* Progress bars */
+.progress-bar { height: 6px; background: var(--bg); border-radius: 3px; overflow: hidden; }
+.progress-fill { height: 100%; border-radius: 3px; transition: width 0.5s ease; }
+
+/* Arena */
+.arena-response { border-left: 3px solid var(--cyan); }
+.arena-response:nth-child(2) { border-left-color: var(--purple); }
+.arena-response:nth-child(3) { border-left-color: var(--green); }

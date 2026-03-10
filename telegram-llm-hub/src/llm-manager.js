@@ -71,6 +71,16 @@ class LLMManager {
     this.providerCache.delete(`${userId}:${providerName}`);
   }
 
+  // Chat with a specific named provider (for arena battles)
+  async chatWithProvider(userId, providerName, messages, opts = {}) {
+    const row = db.prepare('SELECT * FROM providers WHERE user_id = ? AND name = ?').get(userId, providerName);
+    if (!row) throw new Error(`Provider '${providerName}' not found`);
+    if (!row.api_key && !row.is_local) throw new Error(`Provider '${providerName}' has no API key`);
+    const provider = this._buildProvider(row);
+    const response = await provider.chat(messages, opts);
+    return { text: response, provider: row.display_name, model: row.model };
+  }
+
   // Chat with fallback across providers
   async chat(userId, messages, opts = {}) {
     const providers = this.getEnabledProviders(userId);
