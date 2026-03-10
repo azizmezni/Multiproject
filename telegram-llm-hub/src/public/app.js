@@ -71,7 +71,7 @@ function showSection(name) {
   state.activeSection = name;
   document.querySelectorAll('.nav-btn').forEach(b => b.classList.toggle('active', b.dataset.section === name));
   const content = document.getElementById('content');
-  const renderers = { home: renderHome, providers: renderProviders, boards: renderBoards, workflows: renderWorkflows, drafts: renderDrafts, chat: renderChat, achievements: renderAchievements };
+  const renderers = { home: renderHome, providers: renderProviders, boards: renderBoards, workflows: renderWorkflows, drafts: renderDrafts, projects: renderProjects, chat: renderChat, achievements: renderAchievements };
   const fn = renderers[name];
   if (fn) fn(content);
 }
@@ -1201,6 +1201,86 @@ async function cloneDraft(draftId, planTitle, planDescription) {
 }
 
 async function deleteDraft(id) { await DEL(`/drafts/${id}`); renderDrafts(document.getElementById('content')); }
+
+// ===================== PROJECTS (Exported) =====================
+async function renderProjects(el) {
+  el.innerHTML = '<div class="section-title"><span class="icon">🚀</span> Exported Projects</div><div style="padding:20px;color:var(--text2)">Loading projects...</div>';
+
+  try {
+    const data = await GET('/projects');
+    const projects = data.projects || [];
+
+    if (projects.length === 0) {
+      el.innerHTML = `
+        <div class="section-title"><span class="icon">🚀</span> Exported Projects</div>
+        <div class="empty-state">
+          <div class="empty-icon">🚀</div>
+          <h3>No exported projects</h3>
+          <p>Export a workflow as Node.js or API Server to see it here</p>
+        </div>`;
+      return;
+    }
+
+    const projectCards = projects.map(p => {
+      const typeBadge = p.types.map(t => {
+        const badges = { 'nodejs': 'badge-green', 'api': 'badge-blue', 'docker': 'badge-purple' };
+        return `<span class="badge ${badges[t] || 'badge-blue'}">${t}</span>`;
+      }).join(' ');
+      const statusBadge = p.running
+        ? `<span class="badge badge-green" style="animation:pulse 2s infinite">● Running :${p.port}</span>`
+        : '<span class="badge" style="background:var(--bg)">○ Stopped</span>';
+      const subdomain = p.safeName.toLowerCase();
+
+      return `<div class="card project-card">
+        <div class="card-header">
+          <div class="card-title">${escapeHtml(p.name)}</div>
+          ${statusBadge}
+        </div>
+        <div style="display:flex;gap:4px;margin:6px 0">${typeBadge}</div>
+        <div style="font-size:11px;color:var(--text2);margin-bottom:8px">
+          ${p.files} files${p.running ? ` • <a href="http://${subdomain}.localhost:9999" target="_blank" style="color:var(--cyan)">${subdomain}.localhost:9999</a>` : ''}
+        </div>
+        <div class="btn-group">
+          ${p.running
+            ? `<button class="btn btn-danger btn-sm" onclick="projectAction('${escapeAttr(p.safeName)}','stop')">⏹ Stop</button>
+               <a href="http://${subdomain}.localhost:9999" target="_blank" class="btn btn-sm btn-primary">🌐 Open</a>`
+            : `<button class="btn btn-sm btn-primary" onclick="projectAction('${escapeAttr(p.safeName)}','start')">▶ Start</button>`
+          }
+          <button class="btn btn-sm" onclick="projectLogs('${escapeAttr(p.safeName)}')">📋 Logs</button>
+        </div>
+      </div>`;
+    }).join('');
+
+    el.innerHTML = `
+      <div class="section-title"><span class="icon">🚀</span> Exported Projects <span class="badge badge-blue">${projects.length}</span></div>
+      <div class="grid grid-2">${projectCards}</div>`;
+  } catch (err) {
+    el.innerHTML = `<div class="section-title"><span class="icon">🚀</span> Projects</div><p style="color:var(--pink)">Error: ${err.message}</p>`;
+  }
+}
+
+async function projectAction(name, action) {
+  try {
+    await POST(`/projects/${name}/${action}`);
+    showToast(action === 'start' ? '▶' : '⏹', `Project ${action === 'start' ? 'started' : 'stopped'}!`);
+    renderProjects(document.getElementById('content'));
+  } catch (err) {
+    showToast('❌', err.message || 'Error');
+  }
+}
+
+async function projectLogs(name) {
+  try {
+    const data = await GET(`/projects/${name}/logs`);
+    const logs = data.logs || 'No logs yet';
+    showWideModal(`📋 Logs: ${name}`, `
+      <pre class="nd-result-pre" style="max-height:500px;overflow-y:auto;font-size:11px;white-space:pre-wrap">${escapeHtml(logs)}</pre>
+      <button class="btn btn-sm" style="margin-top:8px" onclick="projectLogs('${escapeAttr(name)}')">🔄 Refresh</button>
+    `);
+  } catch (err) {
+    showToast('❌', err.message || 'Error');
+  }
+}
 
 // ===================== CHAT =====================
 function renderChat(el) {

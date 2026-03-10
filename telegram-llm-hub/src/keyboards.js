@@ -119,7 +119,10 @@ export const kb = {
 
     // Smart actions based on link type
     if (['github_repo', 'github', 'github_code'].includes(linkType)) {
-      buttons.push([Markup.button.callback('📥 Clone & Setup', `smart_clone:${draftId}`)]);
+      buttons.push([
+        Markup.button.callback('📥 Clone & Setup', `smart_clone:${draftId}`),
+        Markup.button.callback('⚡ Clone & Run', `smart_clone_run:${draftId}`),
+      ]);
       buttons.push([Markup.button.callback('🔍 Analyze Repo', `smart_analyze:${draftId}`)]);
     }
     if (linkType === 'youtube' || linkType === 'youtube_playlist') {

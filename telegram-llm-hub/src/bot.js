@@ -87,12 +87,32 @@ export function createBot(token) {
       `/providers \u2014 Manage LLMs | /setkey <prov> <key>\n` +
       `/drafts \u2014 Draft board | /settings \u2014 Config\n` +
       `/qa <id> \u2014 Run QA | /run <cmd> \u2014 CLI\n\n` +
-      `*Tips:* Share links \u2192 drafts | Auto-fallback across providers`,
+      `*Shortcuts:*\n` +
+      `/main or /m \u2014 Show main menu\n` +
+      `/f <desc> \u2014 Quick add feature\n` +
+      `/b <desc> \u2014 Quick fix bug\n\n` +
+      `*Tips:* Share links \u2192 smart actions | Auto-fallback across providers`,
       { parse_mode: 'Markdown' }
     );
   });
 
   bot.command('menu', (ctx) => ctx.reply('Main Menu:', kb.mainMenu()));
+  bot.command('main', (ctx) => ctx.reply('Main Menu:', kb.mainMenu()));
+  bot.command('m', (ctx) => ctx.reply('Main Menu:', kb.mainMenu()));
+
+  // Quick shortcuts
+  bot.command('f', async (ctx) => {
+    const desc = ctx.message.text.replace(/^\/f\s*/, '').trim();
+    if (!desc) return ctx.reply('Usage: /f <feature description>');
+    llm.initDefaults(ctx.from.id);
+    await handleDevRequest(ctx, ctx.from.id, 'feature', desc);
+  });
+  bot.command('b', async (ctx) => {
+    const desc = ctx.message.text.replace(/^\/b\s*/, '').trim();
+    if (!desc) return ctx.reply('Usage: /b <bug description>');
+    llm.initDefaults(ctx.from.id);
+    await handleDevRequest(ctx, ctx.from.id, 'bugfix', desc);
+  });
 
   // --- Chat ---
   bot.command('chat', async (ctx) => {
@@ -1002,6 +1022,89 @@ Return ONLY the JSON array. No markdown, no extra text, no code fences.` },
         `${analysis.text.substring(0, 800)}\n\n` +
         `_via ${analysis.provider}_`
       );
+
+      drafts.updateStatus(draft.id, 'processed');
+    } catch (err) {
+      await ctx.reply(`❌ Error: ${err.message}`);
+    }
+  });
+
+  // ⚡ Clone & Run — clone repo, install deps, detect start cmd, run it
+  bot.action(/smart_clone_run:(\d+)/, async (ctx) => {
+    await ctx.answerCbQuery();
+    const draft = drafts.get(parseInt(ctx.match[1]));
+    if (!draft) return;
+
+    let cloneUrl = draft.url;
+    if (cloneUrl.includes('github.com') && !cloneUrl.endsWith('.git')) {
+      cloneUrl = cloneUrl.replace(/\/$/, '') + '.git';
+    }
+    const repoName = cloneUrl.match(/\/([^/]+?)(?:\.git)?$/)?.[1] || 'repo';
+
+    await ctx.editMessageText(`⚡ *Clone & Run:* \`${repoName}\`\n\nCloning...`, { parse_mode: 'Markdown' });
+
+    try {
+      const fs = await import('fs/promises');
+      const path = await import('path');
+      const repoDir = path.join(process.cwd(), repoName);
+
+      // Clone
+      const cloneResult = await qa.runCommand(`git clone ${cloneUrl}`, process.cwd(), 60000);
+      if (!cloneResult.ok && !cloneResult.stderr?.includes('already exists')) {
+        return safeSend(ctx, `❌ Clone failed:\n\`${cloneResult.stderr?.substring(0, 500)}\``);
+      }
+      await ctx.reply('✅ Cloned. Installing dependencies...');
+
+      // Detect and install
+      const files = await fs.readdir(repoDir).catch(() => []);
+      let startCmd = null;
+
+      if (files.includes('package.json')) {
+        await qa.runCommand('npm install', repoDir, 120000);
+        // Read package.json to find start script
+        try {
+          const pkg = JSON.parse(await fs.readFile(path.join(repoDir, 'package.json'), 'utf-8'));
+          if (pkg.scripts?.dev) startCmd = 'npm run dev';
+          else if (pkg.scripts?.start) startCmd = 'npm start';
+          else if (pkg.main) startCmd = `node ${pkg.main}`;
+        } catch {}
+      } else if (files.includes('requirements.txt')) {
+        await qa.runCommand('pip install -r requirements.txt', repoDir, 120000);
+        if (files.includes('app.py')) startCmd = 'python app.py';
+        else if (files.includes('main.py')) startCmd = 'python main.py';
+        else if (files.includes('manage.py')) startCmd = 'python manage.py runserver';
+      } else if (files.includes('go.mod')) {
+        await qa.runCommand('go mod download', repoDir, 60000);
+        startCmd = 'go run .';
+      } else if (files.includes('Cargo.toml')) {
+        startCmd = 'cargo run';
+      }
+
+      await ctx.reply('✅ Dependencies installed.');
+
+      if (startCmd) {
+        await ctx.reply(`🚀 Starting with \`${startCmd}\`...`, { parse_mode: 'Markdown' });
+        // Run in background — don't await
+        const { spawn } = await import('child_process');
+        const child = spawn(startCmd.split(' ')[0], startCmd.split(' ').slice(1), {
+          cwd: repoDir, shell: true, stdio: 'ignore', detached: true,
+        });
+        child.unref();
+        await safeSend(ctx,
+          `⚡ *${repoName}* is running!\n\n` +
+          `Start command: \`${startCmd}\`\n` +
+          `Directory: \`${repoDir}\`\n` +
+          `PID: ${child.pid}\n\n` +
+          `_To stop: kill the process or restart the server_`
+        );
+      } else {
+        await safeSend(ctx,
+          `✅ *${repoName}* cloned and installed!\n\n` +
+          `Could not auto-detect start command.\n` +
+          `Directory: \`${repoDir}\`\n\n` +
+          `Check the README for how to run it.`
+        );
+      }
 
       drafts.updateStatus(draft.id, 'processed');
     } catch (err) {

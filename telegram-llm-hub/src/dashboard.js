@@ -1,6 +1,9 @@
 import express from 'express';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
+import { readdir, readFile, stat } from 'fs/promises';
+import { spawn } from 'child_process';
+import http from 'http';
 import db from './db.js';
 import { llm } from './llm-manager.js';
 import { sessions } from './sessions.js';
@@ -13,9 +16,50 @@ import { PROVIDER_REGISTRY } from './providers.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
+// --- Exported project management ---
+const runningProjects = new Map(); // name -> { process, port, logs }
+let nextProjectPort = 10001;
+
 export function createDashboard(port = 9999) {
   const app = express();
   app.use(express.json());
+
+  // --- Subdomain proxy: projectname.localhost:PORT → project's internal port ---
+  app.use((req, res, next) => {
+    const host = req.hostname || '';
+    // Check for subdomain: name.localhost
+    const parts = host.split('.');
+    if (parts.length >= 2 && parts[parts.length - 1] === 'localhost') {
+      const subdomain = parts.slice(0, -1).join('.').toLowerCase();
+      if (subdomain && subdomain !== 'localhost') {
+        const project = runningProjects.get(subdomain);
+        if (project) {
+          // Proxy to the project's port
+          const proxyReq = http.request({
+            hostname: '127.0.0.1', port: project.port,
+            path: req.originalUrl, method: req.method,
+            headers: { ...req.headers, host: `localhost:${project.port}` },
+          }, (proxyRes) => {
+            res.writeHead(proxyRes.statusCode, proxyRes.headers);
+            proxyRes.pipe(res);
+          });
+          proxyReq.on('error', () => {
+            res.status(502).json({ error: `Project "${subdomain}" is not responding on port ${project.port}` });
+          });
+          if (req.method !== 'GET' && req.method !== 'HEAD') {
+            req.pipe(proxyReq);
+          } else {
+            proxyReq.end();
+          }
+          return;
+        }
+        // No running project with that name — show helpful error
+        return res.status(404).json({ error: `Project "${subdomain}" is not running. Start it from the Projects tab.` });
+      }
+    }
+    next();
+  });
+
   app.use(express.static(join(__dirname, 'public')));
 
   // Resolve userId: use query param or first known user, or default 1
@@ -739,6 +783,147 @@ After the JSON array, add a markdown section starting with "---\\n**Knowledge & 
   app.post('/api/run', async (req, res) => {
     const result = await qa.runCommand(req.body.command, req.body.cwd);
     res.json(result);
+  });
+
+  // ==================== PROJECTS (Exported) ====================
+  const outputDir = join(__dirname, '..', 'output');
+
+  // List all exported projects with their types and running status
+  app.get('/api/projects', async (req, res) => {
+    try {
+      const entries = await readdir(outputDir, { withFileTypes: true }).catch(() => []);
+      const projects = [];
+
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        const projDir = join(outputDir, entry.name);
+        const subEntries = await readdir(projDir).catch(() => []);
+
+        // Find export types
+        const types = [];
+        let fileCount = 0;
+        for (const sub of subEntries) {
+          if (sub === 'export-nodejs') { types.push('nodejs'); fileCount += (await readdir(join(projDir, sub)).catch(() => [])).length; }
+          if (sub === 'export-api') { types.push('api'); fileCount += (await readdir(join(projDir, sub)).catch(() => [])).length; }
+          if (sub === 'export-docker') { types.push('docker'); fileCount += (await readdir(join(projDir, sub)).catch(() => [])).length; }
+        }
+
+        if (types.length === 0) continue; // No export directories
+
+        const safeName = entry.name.replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase();
+        const running = runningProjects.has(safeName);
+        const runInfo = running ? runningProjects.get(safeName) : null;
+
+        projects.push({
+          name: entry.name,
+          safeName,
+          types,
+          files: fileCount,
+          running,
+          port: runInfo?.port || null,
+        });
+      }
+
+      res.json({ projects });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Start an exported project
+  app.post('/api/projects/:name/start', async (req, res) => {
+    const name = req.params.name;
+    if (runningProjects.has(name)) {
+      return res.json({ ok: true, message: 'Already running', port: runningProjects.get(name).port });
+    }
+
+    // Find the project directory (match safeName against output dirs)
+    const entries = await readdir(outputDir, { withFileTypes: true }).catch(() => []);
+    const projEntry = entries.find(e =>
+      e.isDirectory() && e.name.replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase() === name
+    );
+    if (!projEntry) return res.status(404).json({ error: 'Project not found' });
+
+    const projDir = join(outputDir, projEntry.name);
+    // Prefer api export (has server.js), then docker, then nodejs
+    let runDir = null;
+    let runCmd = 'node';
+    let runArgs = ['server.js'];
+
+    if (await stat(join(projDir, 'export-api', 'server.js')).catch(() => null)) {
+      runDir = join(projDir, 'export-api');
+      runArgs = ['server.js'];
+    } else if (await stat(join(projDir, 'export-docker', 'server.js')).catch(() => null)) {
+      runDir = join(projDir, 'export-docker');
+      runArgs = ['server.js'];
+    } else if (await stat(join(projDir, 'export-nodejs', 'index.js')).catch(() => null)) {
+      runDir = join(projDir, 'export-nodejs');
+      runArgs = ['index.js'];
+    }
+
+    if (!runDir) return res.status(400).json({ error: 'No runnable export found (need api or nodejs export)' });
+
+    // Install deps if node_modules missing
+    try {
+      await stat(join(runDir, 'node_modules'));
+    } catch {
+      await qa.runCommand('npm install', runDir, 60000);
+    }
+
+    const port = nextProjectPort++;
+    const logBuffer = [];
+
+    try {
+      const child = spawn(runCmd, runArgs, {
+        cwd: runDir, shell: true,
+        env: { ...process.env, PORT: String(port) },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+
+      child.stdout.on('data', (d) => {
+        const line = d.toString();
+        logBuffer.push(line);
+        if (logBuffer.length > 200) logBuffer.shift();
+      });
+      child.stderr.on('data', (d) => {
+        const line = '[ERR] ' + d.toString();
+        logBuffer.push(line);
+        if (logBuffer.length > 200) logBuffer.shift();
+      });
+      child.on('exit', (code) => {
+        logBuffer.push(`\n[Process exited with code ${code}]`);
+        runningProjects.delete(name);
+      });
+
+      runningProjects.set(name, { process: child, port, logs: logBuffer, dir: runDir });
+
+      res.json({ ok: true, port, url: `http://${name}.localhost:${req.socket.localPort || 9999}` });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Stop an exported project
+  app.post('/api/projects/:name/stop', (req, res) => {
+    const name = req.params.name;
+    const project = runningProjects.get(name);
+    if (!project) return res.status(404).json({ error: 'Not running' });
+
+    try {
+      project.process.kill();
+      runningProjects.delete(name);
+      res.json({ ok: true });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Get project logs
+  app.get('/api/projects/:name/logs', (req, res) => {
+    const name = req.params.name;
+    const project = runningProjects.get(name);
+    if (!project) return res.json({ logs: 'Project is not running.' });
+    res.json({ logs: project.logs.join('') });
   });
 
   // SPA fallback
