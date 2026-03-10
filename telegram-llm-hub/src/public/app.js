@@ -150,31 +150,59 @@ async function renderProviders(el) {
   await refreshAll();
   const providers = state.providers;
   const registry = state.registry;
+  const cloud = providers.filter(p => !p.is_local);
+  const local = providers.filter(p => p.is_local);
+
+  function provStatus(p) {
+    if (!p.enabled) return { dot: 'status-off', label: 'Disabled' };
+    if (p.is_local) return { dot: 'status-on', label: 'Local' };
+    if (p.api_key) return { dot: 'status-on', label: 'Active' };
+    return { dot: 'status-warn', label: 'No key' };
+  }
+
+  function renderCard(p, i) {
+    const reg = registry.find(r => r.name === p.name) || {};
+    const st = provStatus(p);
+    return `<div class="prov-card ${p.enabled ? '' : 'disabled'} prov-${st.dot}" data-name="${p.name}" style="animation-delay:${i * 0.03}s">
+      <div class="prov-rank">#${i + 1}</div>
+      <div class="prov-status-dot ${st.dot}" title="${st.label}"></div>
+      <div class="prov-info">
+        <div class="prov-name">${p.display_name} <span class="prov-badge">${p.is_local ? '🏠 Local' : '☁️ Cloud'}</span></div>
+        <div class="prov-tagline">${reg.tagline || reg.description || ''}</div>
+        <div class="prov-model">Model: <code>${p.model}</code></div>
+        <div class="prov-docs"><a href="${reg.docs || '#'}" target="_blank">📖 Docs</a></div>
+      </div>
+      <div class="prov-actions">
+        <button onclick="moveProv('${p.name}','up')" title="Move up">⬆️</button>
+        <button onclick="moveProv('${p.name}','down')" title="Move down">⬇️</button>
+        <button onclick="toggleProv('${p.name}')" title="Toggle">${p.enabled ? '✅' : '❌'}</button>
+        ${!p.is_local ? `<button onclick="promptSetKey('${p.name}','${p.display_name}')" title="Set key">🔑</button>` : ''}
+        <button onclick="promptSetModel('${p.name}','${p.display_name}')" title="Change model">📊</button>
+        <button onclick="testProvider('${p.name}')" title="Test connection" id="test-btn-${p.name}">🏓</button>
+      </div>
+    </div>`;
+  }
 
   el.innerHTML = `
-    <div class="section-title"><span class="icon">🔧</span> LLM Providers</div>
-    <p style="color:var(--text2);margin-bottom:16px">Drag to reorder. Requests try each enabled provider in order with automatic fallback.</p>
-    <div id="prov-list">
-      ${providers.map((p, i) => {
-        const reg = registry.find(r => r.name === p.name) || {};
-        return `<div class="prov-card ${p.enabled ? '' : 'disabled'}" data-name="${p.name}" style="animation-delay:${i * 0.05}s">
-          <div class="prov-num">${i + 1}</div>
-          <div class="prov-icon">${p.is_local ? '🏠' : '☁️'}</div>
-          <div class="prov-info">
-            <div class="prov-name">${p.display_name}</div>
-            <div class="prov-model">Model: <code>${p.model}</code> ${p.api_key ? '🔑' : '<span style="color:var(--orange)">⚠️ No key</span>'}</div>
-            <div class="prov-docs"><a href="${reg.docs || '#'}" target="_blank">📖 Setup docs</a> — ${reg.description || ''}</div>
-          </div>
-          <div class="prov-actions">
-            <button onclick="moveProv('${p.name}','up')" title="Move up">⬆️</button>
-            <button onclick="moveProv('${p.name}','down')" title="Move down">⬇️</button>
-            <button onclick="toggleProv('${p.name}')" title="Toggle">${p.enabled ? '✅' : '❌'}</button>
-            ${!p.is_local ? `<button onclick="promptSetKey('${p.name}','${p.display_name}')" title="Set key">🔑</button>` : ''}
-            <button onclick="promptSetModel('${p.name}','${p.display_name}')" title="Change model">📊</button>
-          </div>
-        </div>`;
-      }).join('')}
-    </div>`;
+    <div class="section-title"><span class="icon">🔧</span> LLM Providers <span class="badge badge-blue">${providers.length} total</span></div>
+    <p style="color:var(--text2);margin-bottom:16px">Requests try each enabled provider in order with automatic fallback. Test connections with 🏓.</p>
+    <div class="prov-group-label">☁️ Cloud Providers (${cloud.length})</div>
+    <div id="prov-list-cloud">${cloud.map((p, i) => renderCard(p, i)).join('')}</div>
+    <div class="prov-group-label" style="margin-top:20px">🏠 Local Providers (${local.length})</div>
+    <div id="prov-list-local">${local.map((p, i) => renderCard(p, cloud.length + i)).join('')}</div>`;
+}
+
+async function testProvider(name) {
+  const btn = document.getElementById(`test-btn-${name}`);
+  if (btn) { btn.textContent = '⏳'; btn.disabled = true; }
+  try {
+    const result = await POST(`/providers/${name}/test`);
+    const msg = result.ok ? `✅ ${name} OK (${result.latency}ms)` : `❌ ${name}: ${result.error}`;
+    showToast(msg);
+  } catch (err) {
+    showToast(`❌ ${name}: ${err.message}`);
+  }
+  if (btn) { btn.textContent = '🏓'; btn.disabled = false; }
 }
 
 async function toggleProv(name) { await PUT(`/providers/${name}/toggle`); renderProviders(document.getElementById('content')); }

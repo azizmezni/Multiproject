@@ -1,6 +1,28 @@
 import db from './db.js';
 import { createProvider, PROVIDER_REGISTRY } from './providers.js';
 
+// All provider defaults with env keys and priorities
+const PROVIDER_DEFAULTS = [
+  { name: 'claude', envKey: 'ANTHROPIC_API_KEY', model: 'claude-sonnet-4-20250514', priority: 0 },
+  { name: 'openai', envKey: 'OPENAI_API_KEY', model: 'gpt-4o', priority: 1 },
+  { name: 'gemini', envKey: 'GEMINI_API_KEY', model: 'gemini-2.0-flash', priority: 2 },
+  { name: 'mistral', envKey: 'MISTRAL_API_KEY', model: 'mistral-large-latest', priority: 3 },
+  { name: 'groq', envKey: 'GROQ_API_KEY', model: 'llama-3.3-70b-versatile', priority: 4 },
+  { name: 'cohere', envKey: 'COHERE_API_KEY', model: 'command-r-plus', priority: 5 },
+  { name: 'deepseek', envKey: 'DEEPSEEK_API_KEY', model: 'deepseek-chat', priority: 6 },
+  { name: 'grok', envKey: 'XAI_API_KEY', model: 'grok-2', priority: 7 },
+  { name: 'openrouter', envKey: 'OPENROUTER_API_KEY', model: 'anthropic/claude-sonnet-4-20250514', priority: 8 },
+  { name: 'together', envKey: 'TOGETHER_API_KEY', model: 'meta-llama/Llama-3.3-70B-Instruct-Turbo', priority: 9 },
+  { name: 'perplexity', envKey: 'PERPLEXITY_API_KEY', model: 'sonar-pro', priority: 10 },
+  { name: 'fireworks', envKey: 'FIREWORKS_API_KEY', model: 'accounts/fireworks/models/llama-v3p3-70b-instruct', priority: 11 },
+  { name: 'cerebras', envKey: 'CEREBRAS_API_KEY', model: 'llama-3.3-70b', priority: 12 },
+  { name: 'ollama', envKey: null, model: 'llama3.2', priority: 13, isLocal: true },
+  { name: 'lmstudio', envKey: null, model: 'default', priority: 14, isLocal: true },
+];
+
+// Providers that support vision input
+const VISION_PROVIDERS = ['claude', 'openai', 'gemini', 'openrouter'];
+
 class LLMManager {
   constructor() {
     this.providerCache = new Map();
@@ -9,20 +31,11 @@ class LLMManager {
   // Initialize default providers from env for a user
   initDefaults(userId) {
     const existing = db.prepare('SELECT COUNT(*) as c FROM providers WHERE user_id = ?').get(userId);
-    if (existing.c > 0) return;
-
-    const defaults = [
-      { name: 'claude', envKey: 'ANTHROPIC_API_KEY', model: 'claude-sonnet-4-20250514', priority: 0 },
-      { name: 'openai', envKey: 'OPENAI_API_KEY', model: 'gpt-4o', priority: 1 },
-      { name: 'gemini', envKey: 'GEMINI_API_KEY', model: 'gemini-2.0-flash', priority: 2 },
-      { name: 'mistral', envKey: 'MISTRAL_API_KEY', model: 'mistral-large-latest', priority: 3 },
-      { name: 'groq', envKey: 'GROQ_API_KEY', model: 'llama-3.1-70b-versatile', priority: 4 },
-      { name: 'cohere', envKey: 'COHERE_API_KEY', model: 'command-r-plus', priority: 5 },
-      { name: 'deepseek', envKey: 'DEEPSEEK_API_KEY', model: 'deepseek-chat', priority: 6 },
-      { name: 'grok', envKey: 'XAI_API_KEY', model: 'grok-2', priority: 7 },
-      { name: 'ollama', envKey: null, model: 'llama3.1', priority: 8, isLocal: true },
-      { name: 'lmstudio', envKey: null, model: 'default', priority: 9, isLocal: true },
-    ];
+    if (existing.c > 0) {
+      // Migration: add any new providers that don't exist yet for this user
+      this._migrateNewProviders(userId);
+      return;
+    }
 
     const insert = db.prepare(`
       INSERT OR IGNORE INTO providers (user_id, name, display_name, api_key, model, priority, enabled, is_local, base_url)
@@ -30,33 +43,67 @@ class LLMManager {
     `);
 
     const tx = db.transaction(() => {
-      for (const d of defaults) {
+      for (const d of PROVIDER_DEFAULTS) {
         const apiKey = d.envKey ? (process.env[d.envKey] || '') : '';
         const reg = PROVIDER_REGISTRY[d.name];
+        if (!reg) continue;
         const enabled = d.isLocal ? 1 : (apiKey ? 1 : 0);
-        const baseUrl = d.isLocal
-          ? (d.name === 'ollama' ? (process.env.OLLAMA_BASE_URL || 'http://localhost:11434') : (process.env.LMSTUDIO_BASE_URL || 'http://localhost:1234'))
-          : '';
+        const baseUrl = this._getDefaultBaseUrl(d);
         insert.run(userId, d.name, reg.name, apiKey, d.model, d.priority, enabled, d.isLocal ? 1 : 0, baseUrl);
       }
     });
     tx();
   }
 
-  // Get ordered list of enabled providers for a user
+  // Add new providers for existing users (migration)
+  _migrateNewProviders(userId) {
+    const existingNames = db.prepare('SELECT name FROM providers WHERE user_id = ?')
+      .all(userId).map(r => r.name);
+    const maxPriority = db.prepare('SELECT MAX(priority) as m FROM providers WHERE user_id = ?')
+      .get(userId)?.m || 0;
+
+    const insert = db.prepare(`
+      INSERT OR IGNORE INTO providers (user_id, name, display_name, api_key, model, priority, enabled, is_local, base_url)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    let nextPriority = maxPriority + 1;
+    const tx = db.transaction(() => {
+      for (const d of PROVIDER_DEFAULTS) {
+        if (existingNames.includes(d.name)) continue;
+        const reg = PROVIDER_REGISTRY[d.name];
+        if (!reg) continue;
+        const apiKey = d.envKey ? (process.env[d.envKey] || '') : '';
+        const enabled = d.isLocal ? 1 : (apiKey ? 1 : 0);
+        const baseUrl = this._getDefaultBaseUrl(d);
+        insert.run(userId, d.name, reg.name, apiKey, d.model, nextPriority++, enabled, d.isLocal ? 1 : 0, baseUrl);
+      }
+    });
+    tx();
+  }
+
+  _getDefaultBaseUrl(d) {
+    if (!d.isLocal) return '';
+    if (d.name === 'ollama') return process.env.OLLAMA_BASE_URL || 'http://localhost:11434';
+    if (d.name === 'lmstudio') return process.env.LMSTUDIO_BASE_URL || 'http://localhost:1234';
+    return '';
+  }
+
+  // Get ordered list of all providers for a user
   getProviders(userId) {
     return db.prepare(
       'SELECT * FROM providers WHERE user_id = ? ORDER BY priority ASC'
     ).all(userId);
   }
 
+  // Get only enabled providers
   getEnabledProviders(userId) {
     return db.prepare(
       'SELECT * FROM providers WHERE user_id = ? AND enabled = 1 ORDER BY priority ASC'
     ).all(userId);
   }
 
-  // Build a provider instance from DB row
+  // Build a provider instance from DB row (cached)
   _buildProvider(row) {
     const key = `${row.user_id}:${row.name}`;
     if (this.providerCache.has(key)) return this.providerCache.get(key);
@@ -79,6 +126,14 @@ class LLMManager {
     const provider = this._buildProvider(row);
     const response = await provider.chat(messages, opts);
     return { text: response, provider: row.display_name, model: row.model };
+  }
+
+  // Test a specific provider connection
+  async testProvider(userId, providerName) {
+    const row = db.prepare('SELECT * FROM providers WHERE user_id = ? AND name = ?').get(userId, providerName);
+    if (!row) throw new Error(`Provider '${providerName}' not found`);
+    const provider = this._buildProvider(row);
+    return provider.test();
   }
 
   // Chat with fallback across providers
@@ -115,10 +170,9 @@ class LLMManager {
   // Vision chat with fallback
   async vision(userId, imageBase64, prompt, mimeType = 'image/png') {
     const providers = this.getEnabledProviders(userId);
-    const visionProviders = ['claude', 'openai', 'gemini'];
 
     for (const row of providers) {
-      if (!visionProviders.includes(row.name)) continue;
+      if (!VISION_PROVIDERS.includes(row.name)) continue;
       if (!row.api_key && !row.is_local) continue;
 
       try {
@@ -151,7 +205,6 @@ class LLMManager {
     this.clearCache(userId, name);
   }
 
-  // Reorder: move provider to new priority position
   reorderProvider(userId, name, direction) {
     const providers = this.getProviders(userId);
     const idx = providers.findIndex(p => p.name === name);

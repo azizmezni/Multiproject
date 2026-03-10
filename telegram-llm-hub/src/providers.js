@@ -1,5 +1,11 @@
 // All LLM provider implementations with a common interface
 
+// Strip <think>...</think> tags from reasoning models (DeepSeek, Qwen, etc.)
+function stripThinkTags(text) {
+  if (!text) return '';
+  return text.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
+}
+
 class BaseProvider {
   constructor(name, displayName, apiKey, model, baseUrl) {
     this.name = name;
@@ -18,12 +24,58 @@ class BaseProvider {
   }
 
   async test() {
+    const start = Date.now();
     try {
       const res = await this.chat([{ role: 'user', content: 'Say "ok"' }], { max_tokens: 10 });
-      return { ok: true, model: this.model, response: res };
+      return { ok: true, model: this.model, latency: Date.now() - start, response: res };
     } catch (e) {
-      return { ok: false, error: e.message };
+      return { ok: false, error: e.message, latency: Date.now() - start };
     }
+  }
+}
+
+// --- OpenAI-compatible base (shared by many providers) ---
+class OpenAICompatibleProvider extends BaseProvider {
+  constructor(name, displayName, apiKey, model, baseUrl, opts = {}) {
+    super(name, displayName, apiKey, model, baseUrl);
+    this.chatPath = opts.chatPath || '/v1/chat/completions';
+    this.extraHeaders = opts.extraHeaders || {};
+    this.stripThink = opts.stripThink || false;
+  }
+
+  async chat(messages, opts = {}) {
+    const res = await fetch(`${this.baseUrl}${this.chatPath}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${this.apiKey}`,
+        ...this.extraHeaders,
+      },
+      body: JSON.stringify({
+        model: this.model,
+        messages,
+        max_tokens: opts.max_tokens || 4096,
+      }),
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(`${this.displayName} error ${res.status}: ${err.error?.message || res.statusText}`);
+    }
+
+    const data = await res.json();
+    const text = data.choices?.[0]?.message?.content || '';
+    return this.stripThink ? stripThinkTags(text) : text;
+  }
+
+  async vision(imageBase64, prompt, mimeType = 'image/png') {
+    return this.chat([{
+      role: 'user',
+      content: [
+        { type: 'image_url', image_url: { url: `data:${mimeType};base64,${imageBase64}` } },
+        { type: 'text', text: prompt },
+      ],
+    }]);
   }
 }
 
@@ -95,32 +147,9 @@ export class ClaudeProvider extends BaseProvider {
 }
 
 // --- OpenAI ---
-export class OpenAIProvider extends BaseProvider {
+export class OpenAIProvider extends OpenAICompatibleProvider {
   constructor(apiKey, model = 'gpt-4o') {
     super('openai', 'OpenAI', apiKey, model, 'https://api.openai.com');
-  }
-
-  async chat(messages, opts = {}) {
-    const res = await fetch(`${this.baseUrl}/v1/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${this.apiKey}`,
-      },
-      body: JSON.stringify({
-        model: this.model,
-        messages,
-        max_tokens: opts.max_tokens || 4096,
-      }),
-    });
-
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(`OpenAI error ${res.status}: ${err.error?.message || res.statusText}`);
-    }
-
-    const data = await res.json();
-    return data.choices?.[0]?.message?.content || '';
   }
 
   async vision(imageBase64, prompt, mimeType = 'image/png') {
@@ -171,65 +200,46 @@ export class GeminiProvider extends BaseProvider {
     const data = await res.json();
     return data.candidates?.[0]?.content?.parts?.[0]?.text || '';
   }
+
+  async vision(imageBase64, prompt, mimeType = 'image/png') {
+    const contents = [{
+      role: 'user',
+      parts: [
+        { inline_data: { mime_type: mimeType, data: imageBase64 } },
+        { text: prompt },
+      ],
+    }];
+
+    const res = await fetch(
+      `${this.baseUrl}/v1beta/models/${this.model}:generateContent?key=${this.apiKey}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ contents }),
+      }
+    );
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(`Gemini Vision error: ${err.error?.message || res.statusText}`);
+    }
+
+    const data = await res.json();
+    return data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+  }
 }
 
-// --- Mistral AI ---
-export class MistralProvider extends BaseProvider {
+// --- Mistral AI (OpenAI-compatible) ---
+export class MistralProvider extends OpenAICompatibleProvider {
   constructor(apiKey, model = 'mistral-large-latest') {
     super('mistral', 'Mistral AI', apiKey, model, 'https://api.mistral.ai');
   }
-
-  async chat(messages, opts = {}) {
-    const res = await fetch(`${this.baseUrl}/v1/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${this.apiKey}`,
-      },
-      body: JSON.stringify({
-        model: this.model,
-        messages,
-        max_tokens: opts.max_tokens || 4096,
-      }),
-    });
-
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(`Mistral error ${res.status}: ${err.error?.message || res.statusText}`);
-    }
-
-    const data = await res.json();
-    return data.choices?.[0]?.message?.content || '';
-  }
 }
 
-// --- Groq ---
-export class GroqProvider extends BaseProvider {
-  constructor(apiKey, model = 'llama-3.1-70b-versatile') {
+// --- Groq (OpenAI-compatible) ---
+export class GroqProvider extends OpenAICompatibleProvider {
+  constructor(apiKey, model = 'llama-3.3-70b-versatile') {
     super('groq', 'Groq', apiKey, model, 'https://api.groq.com/openai');
-  }
-
-  async chat(messages, opts = {}) {
-    const res = await fetch(`${this.baseUrl}/v1/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${this.apiKey}`,
-      },
-      body: JSON.stringify({
-        model: this.model,
-        messages,
-        max_tokens: opts.max_tokens || 4096,
-      }),
-    });
-
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(`Groq error ${res.status}: ${err.error?.message || res.statusText}`);
-    }
-
-    const data = await res.json();
-    return data.choices?.[0]?.message?.content || '';
   }
 }
 
@@ -271,63 +281,60 @@ export class CohereProvider extends BaseProvider {
   }
 }
 
-// --- DeepSeek ---
-export class DeepSeekProvider extends BaseProvider {
+// --- DeepSeek (OpenAI-compatible, strips <think> tags) ---
+export class DeepSeekProvider extends OpenAICompatibleProvider {
   constructor(apiKey, model = 'deepseek-chat') {
-    super('deepseek', 'DeepSeek', apiKey, model, 'https://api.deepseek.com');
-  }
-
-  async chat(messages, opts = {}) {
-    const res = await fetch(`${this.baseUrl}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${this.apiKey}`,
-      },
-      body: JSON.stringify({
-        model: this.model,
-        messages,
-        max_tokens: opts.max_tokens || 4096,
-      }),
+    super('deepseek', 'DeepSeek', apiKey, model, 'https://api.deepseek.com', {
+      chatPath: '/chat/completions',
+      stripThink: true,
     });
-
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(`DeepSeek error ${res.status}: ${err.error?.message || res.statusText}`);
-    }
-
-    const data = await res.json();
-    return data.choices?.[0]?.message?.content || '';
   }
 }
 
-// --- xAI Grok ---
-export class GrokProvider extends BaseProvider {
+// --- xAI Grok (OpenAI-compatible) ---
+export class GrokProvider extends OpenAICompatibleProvider {
   constructor(apiKey, model = 'grok-2') {
     super('grok', 'xAI Grok', apiKey, model, 'https://api.x.ai');
   }
+}
 
-  async chat(messages, opts = {}) {
-    const res = await fetch(`${this.baseUrl}/v1/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${this.apiKey}`,
-      },
-      body: JSON.stringify({
-        model: this.model,
-        messages,
-        max_tokens: opts.max_tokens || 4096,
-      }),
+// --- OpenRouter (OpenAI-compatible, meta-provider) ---
+export class OpenRouterProvider extends OpenAICompatibleProvider {
+  constructor(apiKey, model = 'anthropic/claude-sonnet-4-20250514') {
+    super('openrouter', 'OpenRouter', apiKey, model, 'https://openrouter.ai/api', {
+      extraHeaders: { 'HTTP-Referer': 'https://telegram-llm-hub.local', 'X-Title': 'Telegram LLM Hub' },
     });
+  }
 
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(`Grok error ${res.status}: ${err.error?.message || res.statusText}`);
-    }
+  // OpenRouter supports vision via OpenAI image_url format (inherited from base)
+}
 
-    const data = await res.json();
-    return data.choices?.[0]?.message?.content || '';
+// --- Together AI (OpenAI-compatible) ---
+export class TogetherProvider extends OpenAICompatibleProvider {
+  constructor(apiKey, model = 'meta-llama/Llama-3.3-70B-Instruct-Turbo') {
+    super('together', 'Together AI', apiKey, model, 'https://api.together.xyz');
+  }
+}
+
+// --- Perplexity (OpenAI-compatible, search-augmented) ---
+export class PerplexityProvider extends OpenAICompatibleProvider {
+  constructor(apiKey, model = 'sonar-pro') {
+    super('perplexity', 'Perplexity', apiKey, model, 'https://api.perplexity.ai');
+    this.chatPath = '/chat/completions';
+  }
+}
+
+// --- Fireworks AI (OpenAI-compatible, ultra-fast) ---
+export class FireworksProvider extends OpenAICompatibleProvider {
+  constructor(apiKey, model = 'accounts/fireworks/models/llama-v3p3-70b-instruct') {
+    super('fireworks', 'Fireworks AI', apiKey, model, 'https://api.fireworks.ai/inference');
+  }
+}
+
+// --- Cerebras (OpenAI-compatible, wafer-scale fast) ---
+export class CerebrasProvider extends OpenAICompatibleProvider {
+  constructor(apiKey, model = 'llama-3.3-70b') {
+    super('cerebras', 'Cerebras', apiKey, model, 'https://api.cerebras.ai');
   }
 }
 
@@ -354,60 +361,44 @@ export class OllamaProvider extends BaseProvider {
     }
 
     const data = await res.json();
-    return data.message?.content || '';
+    const text = data.message?.content || '';
+    return stripThinkTags(text);
   }
 
   async test() {
+    const start = Date.now();
     try {
       const res = await fetch(`${this.baseUrl}/api/tags`);
       if (!res.ok) throw new Error('Ollama not running');
       const data = await res.json();
-      return { ok: true, models: data.models?.map(m => m.name) || [] };
+      return { ok: true, models: data.models?.map(m => m.name) || [], latency: Date.now() - start };
     } catch (e) {
-      return { ok: false, error: e.message };
+      return { ok: false, error: e.message, latency: Date.now() - start };
     }
   }
 }
 
 // --- LM Studio (Local) ---
-export class LMStudioProvider extends BaseProvider {
+export class LMStudioProvider extends OpenAICompatibleProvider {
   constructor(baseUrl = 'http://localhost:1234', model = 'default') {
-    super('lmstudio', 'LM Studio (Local)', null, model, baseUrl);
+    super('lmstudio', 'LM Studio (Local)', null, model, baseUrl, { stripThink: true });
     this.isLocal = true;
   }
 
-  async chat(messages, opts = {}) {
-    const res = await fetch(`${this.baseUrl}/v1/chat/completions`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: this.model,
-        messages,
-        max_tokens: opts.max_tokens || 4096,
-      }),
-    });
-
-    if (!res.ok) {
-      throw new Error(`LM Studio error ${res.status}: ${res.statusText}`);
-    }
-
-    const data = await res.json();
-    return data.choices?.[0]?.message?.content || '';
-  }
-
   async test() {
+    const start = Date.now();
     try {
       const res = await fetch(`${this.baseUrl}/v1/models`);
       if (!res.ok) throw new Error('LM Studio not running');
       const data = await res.json();
-      return { ok: true, models: data.data?.map(m => m.id) || [] };
+      return { ok: true, models: data.data?.map(m => m.id) || [], latency: Date.now() - start };
     } catch (e) {
-      return { ok: false, error: e.message };
+      return { ok: false, error: e.message, latency: Date.now() - start };
     }
   }
 }
 
-// Provider registry with docs links
+// Provider registry with docs, models, descriptions
 export const PROVIDER_REGISTRY = {
   claude: {
     class: ClaudeProvider,
@@ -415,39 +406,44 @@ export const PROVIDER_REGISTRY = {
     envKey: 'ANTHROPIC_API_KEY',
     models: ['claude-sonnet-4-20250514', 'claude-haiku-4-5-20251001', 'claude-opus-4-20250514'],
     docs: 'https://docs.anthropic.com/en/docs/initial-setup',
-    description: 'Anthropic Claude - excellent reasoning and coding',
+    description: 'Best-in-class reasoning and coding',
+    tagline: 'Premier AI with deep thinking',
   },
   openai: {
     class: OpenAIProvider,
     name: 'OpenAI',
     envKey: 'OPENAI_API_KEY',
-    models: ['gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo', 'o1', 'o1-mini'],
+    models: ['gpt-4o', 'gpt-4o-mini', 'gpt-4.1', 'gpt-4.1-mini', 'gpt-4.1-nano', 'o3', 'o3-mini', 'o4-mini'],
     docs: 'https://platform.openai.com/docs/quickstart',
-    description: 'OpenAI GPT models - versatile general-purpose',
+    description: 'Versatile GPT & reasoning models',
+    tagline: 'Industry standard, wide ecosystem',
   },
   gemini: {
     class: GeminiProvider,
     name: 'Google Gemini',
     envKey: 'GEMINI_API_KEY',
-    models: ['gemini-2.0-flash', 'gemini-2.0-pro', 'gemini-1.5-pro'],
+    models: ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-2.0-pro', 'gemini-1.5-pro'],
     docs: 'https://ai.google.dev/gemini-api/docs/quickstart',
-    description: 'Google Gemini - large context, multimodal',
+    description: 'Huge context window, multimodal',
+    tagline: '1M+ token context, vision built-in',
   },
   mistral: {
     class: MistralProvider,
     name: 'Mistral AI',
     envKey: 'MISTRAL_API_KEY',
-    models: ['mistral-large-latest', 'mistral-medium-latest', 'mistral-small-latest', 'codestral-latest'],
+    models: ['mistral-large-latest', 'mistral-medium-latest', 'mistral-small-latest', 'codestral-latest', 'pixtral-large-latest'],
     docs: 'https://docs.mistral.ai/getting-started/quickstart/',
-    description: 'Mistral AI - fast European models, great for code',
+    description: 'Fast European models, great for code',
+    tagline: 'EU-based, multilingual, fast inference',
   },
   groq: {
     class: GroqProvider,
     name: 'Groq',
     envKey: 'GROQ_API_KEY',
-    models: ['llama-3.1-70b-versatile', 'llama-3.1-8b-instant', 'mixtral-8x7b-32768'],
+    models: ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'deepseek-r1-distill-llama-70b', 'gemma2-9b-it'],
     docs: 'https://console.groq.com/docs/quickstart',
-    description: 'Groq - ultra-fast inference for open models',
+    description: 'Ultra-fast LPU inference for open models',
+    tagline: 'Fastest open-model inference (LPU)',
   },
   cohere: {
     class: CohereProvider,
@@ -455,31 +451,80 @@ export const PROVIDER_REGISTRY = {
     envKey: 'COHERE_API_KEY',
     models: ['command-r-plus', 'command-r', 'command-light'],
     docs: 'https://docs.cohere.com/docs/the-cohere-platform',
-    description: 'Cohere - enterprise RAG and search',
+    description: 'Enterprise RAG and search',
+    tagline: 'Built for enterprise search & RAG',
   },
   deepseek: {
     class: DeepSeekProvider,
     name: 'DeepSeek',
     envKey: 'DEEPSEEK_API_KEY',
-    models: ['deepseek-chat', 'deepseek-coder', 'deepseek-reasoner'],
+    models: ['deepseek-chat', 'deepseek-r1', 'deepseek-coder', 'deepseek-reasoner'],
     docs: 'https://platform.deepseek.com/api-docs',
-    description: 'DeepSeek - strong coding and math',
+    description: 'Strong coding, math, and reasoning',
+    tagline: 'Open-weight, excels at code & math',
   },
   grok: {
     class: GrokProvider,
     name: 'xAI Grok',
     envKey: 'XAI_API_KEY',
-    models: ['grok-2', 'grok-2-mini'],
+    models: ['grok-2', 'grok-2-mini', 'grok-3', 'grok-3-mini'],
     docs: 'https://docs.x.ai/docs/overview',
-    description: 'xAI Grok - real-time knowledge',
+    description: 'Real-time knowledge from X',
+    tagline: 'Live data, witty, uncensored',
+  },
+  openrouter: {
+    class: OpenRouterProvider,
+    name: 'OpenRouter',
+    envKey: 'OPENROUTER_API_KEY',
+    models: ['anthropic/claude-sonnet-4-20250514', 'openai/gpt-4o', 'google/gemini-2.5-flash', 'meta-llama/llama-3.3-70b-instruct', 'deepseek/deepseek-r1'],
+    docs: 'https://openrouter.ai/docs/quickstart',
+    description: 'Meta-provider: 200+ models, one API',
+    tagline: 'One key, every model, unified billing',
+  },
+  together: {
+    class: TogetherProvider,
+    name: 'Together AI',
+    envKey: 'TOGETHER_API_KEY',
+    models: ['meta-llama/Llama-3.3-70B-Instruct-Turbo', 'meta-llama/Llama-3.1-8B-Instruct-Turbo', 'Qwen/Qwen2.5-72B-Instruct-Turbo', 'deepseek-ai/DeepSeek-R1'],
+    docs: 'https://docs.together.ai/docs/quickstart',
+    description: 'Fast open-model serverless inference',
+    tagline: 'Serverless open models, great pricing',
+  },
+  perplexity: {
+    class: PerplexityProvider,
+    name: 'Perplexity',
+    envKey: 'PERPLEXITY_API_KEY',
+    models: ['sonar-pro', 'sonar', 'sonar-reasoning-pro', 'sonar-reasoning'],
+    docs: 'https://docs.perplexity.ai/guides/getting-started',
+    description: 'Search-augmented with live citations',
+    tagline: 'Internet-connected, cites sources',
+  },
+  fireworks: {
+    class: FireworksProvider,
+    name: 'Fireworks AI',
+    envKey: 'FIREWORKS_API_KEY',
+    models: ['accounts/fireworks/models/llama-v3p3-70b-instruct', 'accounts/fireworks/models/qwen2p5-72b-instruct', 'accounts/fireworks/models/deepseek-r1'],
+    docs: 'https://docs.fireworks.ai/getting-started/quickstart',
+    description: 'Ultra-fast serverless, function calling',
+    tagline: 'Fastest serverless, compound AI',
+  },
+  cerebras: {
+    class: CerebrasProvider,
+    name: 'Cerebras',
+    envKey: 'CEREBRAS_API_KEY',
+    models: ['llama-3.3-70b', 'llama-3.1-8b', 'deepseek-r1-distill-llama-70b'],
+    docs: 'https://inference-docs.cerebras.ai/introduction',
+    description: 'Fastest inference (wafer-scale chip)',
+    tagline: 'Record-breaking speed, wafer-scale AI',
   },
   ollama: {
     class: OllamaProvider,
     name: 'Ollama (Local)',
     envKey: null,
-    models: ['llama3.1', 'codellama', 'mistral', 'phi3', 'gemma2'],
+    models: ['llama3.2', 'llama3.1', 'deepseek-r1', 'qwen2.5', 'phi4', 'gemma2', 'codellama', 'mistral'],
     docs: 'https://ollama.ai/download',
-    description: 'Ollama - run open models locally',
+    description: 'Run open models locally via CLI',
+    tagline: 'Free, private, runs on your machine',
     isLocal: true,
   },
   lmstudio: {
@@ -488,7 +533,8 @@ export const PROVIDER_REGISTRY = {
     envKey: null,
     models: ['default'],
     docs: 'https://lmstudio.ai/docs',
-    description: 'LM Studio - GUI for local models',
+    description: 'GUI for local model management',
+    tagline: 'Desktop app, easy local models',
     isLocal: true,
   },
 };

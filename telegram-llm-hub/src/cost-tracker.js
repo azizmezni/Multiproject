@@ -2,21 +2,56 @@ import db from './db.js';
 
 // Approximate cost per 1M tokens (USD) for common models
 const PRICING = {
+  // Anthropic Claude
   'claude-sonnet-4-20250514': { input: 3.0, output: 15.0 },
-  'claude-3-5-sonnet-20241022': { input: 3.0, output: 15.0 },
-  'claude-3-haiku-20240307': { input: 0.25, output: 1.25 },
+  'claude-haiku-4-5-20251001': { input: 0.8, output: 4.0 },
+  'claude-opus-4-20250514': { input: 15.0, output: 75.0 },
+  // OpenAI
   'gpt-4o': { input: 2.5, output: 10.0 },
   'gpt-4o-mini': { input: 0.15, output: 0.6 },
-  'gpt-4-turbo': { input: 10.0, output: 30.0 },
-  'gemini-1.5-pro': { input: 1.25, output: 5.0 },
-  'gemini-1.5-flash': { input: 0.075, output: 0.3 },
+  'gpt-4.1': { input: 2.0, output: 8.0 },
+  'gpt-4.1-mini': { input: 0.4, output: 1.6 },
+  'gpt-4.1-nano': { input: 0.1, output: 0.4 },
+  'o3': { input: 10.0, output: 40.0 },
+  'o3-mini': { input: 1.1, output: 4.4 },
+  'o4-mini': { input: 1.1, output: 4.4 },
+  // Google Gemini
+  'gemini-2.5-pro': { input: 1.25, output: 10.0 },
+  'gemini-2.5-flash': { input: 0.15, output: 0.6 },
   'gemini-2.0-flash': { input: 0.1, output: 0.4 },
+  'gemini-2.0-pro': { input: 1.25, output: 5.0 },
+  'gemini-1.5-pro': { input: 1.25, output: 5.0 },
+  // Mistral
   'mistral-large-latest': { input: 2.0, output: 6.0 },
   'mistral-small-latest': { input: 0.2, output: 0.6 },
+  'codestral-latest': { input: 0.3, output: 0.9 },
+  // Groq (inference cost)
   'llama-3.3-70b-versatile': { input: 0.59, output: 0.79 },
+  'llama-3.1-8b-instant': { input: 0.05, output: 0.08 },
+  'deepseek-r1-distill-llama-70b': { input: 0.75, output: 0.99 },
+  'gemma2-9b-it': { input: 0.2, output: 0.2 },
+  // DeepSeek
   'deepseek-chat': { input: 0.14, output: 0.28 },
-  'grok-2': { input: 2.0, output: 10.0 },
+  'deepseek-r1': { input: 0.55, output: 2.19 },
+  'deepseek-reasoner': { input: 0.55, output: 2.19 },
+  // Cohere
   'command-r-plus': { input: 2.5, output: 10.0 },
+  'command-r': { input: 0.15, output: 0.6 },
+  // xAI Grok
+  'grok-2': { input: 2.0, output: 10.0 },
+  'grok-3': { input: 3.0, output: 15.0 },
+  'grok-3-mini': { input: 0.3, output: 0.5 },
+  // Perplexity
+  'sonar-pro': { input: 3.0, output: 15.0 },
+  'sonar': { input: 1.0, output: 1.0 },
+  'sonar-reasoning-pro': { input: 2.0, output: 8.0 },
+  // Together AI (open model pricing)
+  'meta-llama/Llama-3.3-70B-Instruct-Turbo': { input: 0.88, output: 0.88 },
+  'Qwen/Qwen2.5-72B-Instruct-Turbo': { input: 0.9, output: 0.9 },
+  // Fireworks AI
+  'accounts/fireworks/models/llama-v3p3-70b-instruct': { input: 0.9, output: 0.9 },
+  // Cerebras
+  'llama-3.3-70b': { input: 0.6, output: 0.6 },
 };
 
 function estimateCost(model, inputTokens, outputTokens) {

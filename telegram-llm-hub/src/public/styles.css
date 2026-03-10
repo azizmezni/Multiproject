@@ -163,33 +163,53 @@ body {
 .grid-4 { grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); }
 
 /* ========== PROVIDER CARDS ========== */
+.prov-group-label {
+  font-size: 13px; font-weight: 700; color: var(--text2); text-transform: uppercase;
+  letter-spacing: 1px; margin-bottom: 10px; padding: 4px 0;
+  border-bottom: 1px solid var(--border);
+}
 .prov-card {
-  display: flex; align-items: center; gap: 14px;
-  padding: 14px 18px;
+  display: flex; align-items: center; gap: 12px;
+  padding: 12px 16px; margin-bottom: 6px;
   background: var(--glass);
   border: 1px solid var(--glass-border);
+  border-left: 3px solid var(--green);
   border-radius: var(--radius);
   transition: all 0.3s;
   animation: fadeSlideIn 0.4s ease-out;
-  cursor: grab;
 }
-.prov-card:hover { border-color: var(--cyan); }
+.prov-card:hover { border-color: var(--cyan); border-left-color: var(--cyan); }
 .prov-card.disabled { opacity: 0.4; }
-.prov-num { font-size: 14px; font-weight: 800; color: var(--text2); min-width: 24px; }
-.prov-icon { font-size: 24px; }
-.prov-info { flex: 1; }
-.prov-name { font-weight: 700; font-size: 14px; }
-.prov-model { font-size: 12px; color: var(--text2); }
+.prov-card.prov-status-on { border-left-color: var(--green); }
+.prov-card.prov-status-warn { border-left-color: var(--orange); }
+.prov-card.prov-status-off { border-left-color: var(--red); }
+.prov-rank { font-size: 12px; font-weight: 800; color: var(--text2); min-width: 28px; text-align: center; }
+.prov-status-dot {
+  width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0;
+}
+.prov-status-dot.status-on { background: var(--green); box-shadow: 0 0 6px var(--green); }
+.prov-status-dot.status-warn { background: var(--orange); box-shadow: 0 0 6px var(--orange); }
+.prov-status-dot.status-off { background: var(--red); }
+.prov-info { flex: 1; min-width: 0; }
+.prov-name { font-weight: 700; font-size: 14px; display: flex; align-items: center; gap: 8px; }
+.prov-badge {
+  font-size: 10px; font-weight: 600; padding: 1px 6px; border-radius: 4px;
+  background: var(--surface); border: 1px solid var(--border); color: var(--text2);
+}
+.prov-tagline { font-size: 11px; color: var(--text2); font-style: italic; margin: 2px 0; }
+.prov-model { font-size: 12px; color: var(--text2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.prov-model code { font-size: 11px; background: var(--surface); padding: 1px 4px; border-radius: 3px; }
 .prov-docs { font-size: 11px; }
 .prov-docs a { color: var(--cyan); text-decoration: none; }
 .prov-docs a:hover { text-decoration: underline; }
-.prov-actions { display: flex; gap: 4px; }
+.prov-actions { display: flex; gap: 4px; flex-shrink: 0; }
 .prov-actions button {
-  width: 32px; height: 32px; border: 1px solid var(--border); border-radius: 8px;
-  background: transparent; color: var(--text); cursor: pointer; font-size: 14px;
+  width: 30px; height: 30px; border: 1px solid var(--border); border-radius: 8px;
+  background: transparent; color: var(--text); cursor: pointer; font-size: 13px;
   transition: all 0.2s; display: flex; align-items: center; justify-content: center;
 }
 .prov-actions button:hover { background: var(--surface); border-color: var(--cyan); }
+.prov-actions button:disabled { opacity: 0.4; cursor: wait; }
 
 /* ========== BUTTONS ========== */
 .btn {

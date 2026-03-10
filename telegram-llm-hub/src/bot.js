@@ -13,6 +13,8 @@ import { arena } from './arena.js';
 import { challenges } from './challenges.js';
 import { costTracker } from './cost-tracker.js';
 import { gamification } from './gamification.js';
+import { templates } from './templates.js';
+import { vault } from './vault.js';
 import https from 'https';
 import http from 'http';
 import { writeFile, unlink } from 'fs/promises';
@@ -81,32 +83,39 @@ export function createBot(token) {
   bot.command('help', async (ctx) => {
     await ctx.reply(
       `*Commands:*\n\n` +
-      `*Boards & Tasks:*\n` +
-      `/new <name> \u2014 Create project board\n` +
-      `/boards \u2014 List boards | /board \u2014 Active board\n\n` +
-      `*Workflows (n8n-style):*\n` +
-      `/workflow <desc> \u2014 Auto-generate workflow\n` +
-      `/wfnew <title> \u2014 Create empty workflow\n` +
-      `/wflist \u2014 List workflows\n` +
-      `/wfnode <name>|<type>|<desc> \u2014 Add node\n` +
-      `/wfconnect <from> <to> \u2014 Connect nodes\n` +
-      `/wfinput <id>|<names> \u2014 Set node inputs\n` +
-      `/wfoutput <id>|<names> \u2014 Set node outputs\n` +
-      `/wfview \u2014 View workflow | /wfrun \u2014 Execute\n` +
-      `/wffix [problem] \u2014 Auto-fix workflow nodes\n\n` +
-      `*Dev Assistant (from phone):*\n` +
-      `/feature <desc> \u2014 Add a feature to the project\n` +
-      `/bugfix <desc> \u2014 Fix a bug in the project\n\n` +
-      `*Chat & Providers:*\n` +
-      `/chat \u2014 New session | /sessions \u2014 List\n` +
-      `/providers \u2014 Manage LLMs | /setkey <prov> <key>\n` +
-      `/drafts \u2014 Draft board | /settings \u2014 Config\n` +
-      `/qa <id> \u2014 Run QA | /run <cmd> \u2014 CLI\n\n` +
-      `*Shortcuts:*\n` +
-      `/main or /m \u2014 Show main menu\n` +
-      `/f <desc> \u2014 Quick add feature\n` +
-      `/b <desc> \u2014 Quick fix bug\n\n` +
-      `*Tips:* Share links \u2192 smart actions | Auto-fallback across providers`,
+      `*📋 Boards & Tasks:*\n` +
+      `/new <name> — Create project board\n` +
+      `/boards — List boards | /board — Active board\n\n` +
+      `*🔧 Workflows:*\n` +
+      `/workflow <desc> — Auto-generate workflow\n` +
+      `/wfnew <title> — Empty workflow\n` +
+      `/wflist — List | /wfview — View\n` +
+      `/wfrun — Execute | /wffix — Auto-fix\n` +
+      `/templates — Browse templates\n` +
+      `/usetemplate <id> — Use a template\n\n` +
+      `*💬 Chat & AI:*\n` +
+      `/chat — New session | /sessions — List\n` +
+      `/arena <prompt> — Battle providers\n` +
+      `/remember <key> <value> — Save to memory\n` +
+      `/recall <query> — Search memory\n` +
+      `/export — Export session\n\n` +
+      `*🤖 Providers:*\n` +
+      `/providers — Manage LLMs\n` +
+      `/models — List all models\n` +
+      `/setkey <prov> <key> — Set API key\n` +
+      `/setmodel <prov> <model> — Change model\n` +
+      `/test <prov> — Test connection\n\n` +
+      `*📊 Stats & More:*\n` +
+      `/status — Quick overview\n` +
+      `/challenges — Daily challenges\n` +
+      `/costs — Usage costs\n` +
+      `/vault — Secret vault\n` +
+      `/vaultset <name> <value> — Store secret\n\n` +
+      `*⚡ Shortcuts:*\n` +
+      `/m — Main menu\n` +
+      `/f <desc> — Quick feature\n` +
+      `/b <desc> — Quick bugfix\n\n` +
+      `*Tips:* Send photos for vision, voice for transcription, links for smart actions`,
       { parse_mode: 'Markdown' }
     );
   });
@@ -2981,5 +2990,147 @@ IMPORTANT:
     await safeSend(ctx, msg);
   });
 
+  // /templates — Browse workflow templates
+  bot.command('templates', async (ctx) => {
+    const list = templates.list().slice(0, 10);
+    if (!list.length) return safeSend(ctx, '📦 No templates available yet.');
+    let msg = '📦 *Workflow Templates*\n\n';
+    for (const t of list) {
+      msg += `*${t.title}* — ${t.description || ''}\n`;
+      msg += `  ⭐ ${t.rating_avg?.toFixed(1) || 'N/A'} | Used ${t.use_count || 0}x | /usetemplate\\_${t.id}\n\n`;
+    }
+    await safeSend(ctx, msg);
+  });
+
+  // /usetemplate_<id> — Use a template
+  bot.onText?.call?.(bot, /\/usetemplate_(\d+)/, async (msg, match) => {}) || null;
+  bot.command('usetemplate', async (ctx) => {
+    const userId = ctx.from.id;
+    const idStr = ctx.message.text.split(/\s+/)[1];
+    if (!idStr) return safeSend(ctx, '❌ Usage: /usetemplate <id>');
+    try {
+      const result = templates.useTemplate(parseInt(idStr), userId);
+      challenges.trackAction(userId, 'template_used');
+      await safeSend(ctx, `✅ Created workflow from template! ID: ${result.workflowId}\nUse /wfview to see it.`);
+    } catch (err) {
+      await safeSend(ctx, `❌ ${err.message}`);
+    }
+  });
+
+  // /vault — View stored secrets
+  bot.command('vault', async (ctx) => {
+    const userId = ctx.from.id;
+    const list = vault.list(userId);
+    if (!list.length) return safeSend(ctx, '🔐 Vault is empty.\nUse /vaultset <name> <value> to store secrets.');
+    let msg = '🔐 *Secret Vault*\n\n';
+    for (const s of list) {
+      msg += `🔑 \`${s.key_name}\` — ${s.scope} ${s.description ? `(${s.description})` : ''}\n`;
+    }
+    msg += '\nValues are encrypted. Use /vaultset to add or /vaultdel <id> to remove.';
+    await safeSend(ctx, msg);
+  });
+
+  // /vaultset <name> <value> [description] — Store a secret
+  bot.command('vaultset', async (ctx) => {
+    const userId = ctx.from.id;
+    const parts = ctx.message.text.split(/\s+/).slice(1);
+    if (parts.length < 2) return safeSend(ctx, '❌ Usage: /vaultset <key_name> <value> [description]');
+    const keyName = parts[0];
+    const value = parts[1];
+    const description = parts.slice(2).join(' ');
+    try {
+      vault.set(userId, keyName, value, 'global', description);
+      await safeSend(ctx, `✅ Secret \`${keyName}\` stored securely.`);
+      // Delete the message with the secret for safety
+      try { await ctx.deleteMessage(); } catch {}
+    } catch (err) {
+      await safeSend(ctx, `❌ ${err.message}`);
+    }
+  });
+
+  // /status — Quick overview of everything
+  bot.command('status', async (ctx) => {
+    const userId = ctx.from.id;
+    llm.initDefaults(userId);
+    const provs = llm.getEnabledProviders(userId);
+    const activeProvs = provs.filter(p => p.api_key || p.is_local).length;
+    const streak = challenges.getStreak(userId);
+    const costSummary = costTracker.getSummary(userId, 7);
+    const daily = challenges.getDailyChallenges(userId);
+    const completed = daily.filter(c => c.completed).length;
+
+    let msg = '📊 *Status Overview*\n\n';
+    msg += `🤖 Providers: ${activeProvs}/${provs.length} active\n`;
+    msg += `🔥 Streak: ${streak.streak} days\n`;
+    msg += `🎯 Challenges: ${completed}/${daily.length} done today\n`;
+    msg += `💰 7-day cost: $${(costSummary.totals?.total_cost || 0).toFixed(4)}\n`;
+    msg += `📨 7-day requests: ${costSummary.totals?.request_count || 0}\n`;
+    await safeSend(ctx, msg);
+  });
+
+  // /models — List all available models
+  bot.command('models', async (ctx) => {
+    const userId = ctx.from.id;
+    const provs = llm.getProviders(userId);
+    let msg = '🧠 *Available Models*\n\n';
+    for (const p of provs) {
+      const reg = PROVIDER_REGISTRY[p.name];
+      if (!reg) continue;
+      const status = p.enabled ? (p.api_key || p.is_local ? '🟢' : '🟡') : '🔴';
+      msg += `${status} *${p.display_name}*\n`;
+      msg += `  Current: \`${p.model}\`\n`;
+      msg += `  Available: ${reg.models.slice(0, 4).map(m => `\`${m}\``).join(', ')}\n\n`;
+    }
+    msg += 'Use /setmodel <provider> <model> to change.';
+    await safeSend(ctx, msg);
+  });
+
+  // /setmodel <provider> <model> — Change a provider's model
+  bot.command('setmodel', async (ctx) => {
+    const userId = ctx.from.id;
+    const parts = ctx.message.text.split(/\s+/).slice(1);
+    if (parts.length < 2) return safeSend(ctx, '❌ Usage: /setmodel <provider> <model>\nExample: /setmodel openai gpt-4.1');
+    const [provName, model] = parts;
+    try {
+      llm.setModel(userId, provName, model);
+      await safeSend(ctx, `✅ ${provName} model set to \`${model}\``);
+    } catch (err) {
+      await safeSend(ctx, `❌ ${err.message}`);
+    }
+  });
+
+  // /test <provider> — Test a provider connection
+  bot.command('test', async (ctx) => {
+    const userId = ctx.from.id;
+    const provName = ctx.message.text.split(/\s+/)[1];
+    if (!provName) return safeSend(ctx, '❌ Usage: /test <provider>\nExample: /test openai');
+    await safeSend(ctx, `🏓 Testing ${provName}...`);
+    try {
+      const result = await llm.testProvider(userId, provName);
+      if (result.ok) {
+        await safeSend(ctx, `✅ ${provName} is working! (${result.latency}ms)`);
+      } else {
+        await safeSend(ctx, `❌ ${provName} failed: ${result.error}`);
+      }
+    } catch (err) {
+      await safeSend(ctx, `❌ ${err.message}`);
+    }
+  });
+
+  // /export — Export current session as text
+  bot.command('export', async (ctx) => {
+    const userId = ctx.from.id;
+    const session = sessions.getActive(userId);
+    if (!session) return safeSend(ctx, '❌ No active session. Use /chat first.');
+    const messages = sessions.getMessages(session.id);
+    let text = `📝 Session: ${session.title}\n${'═'.repeat(30)}\n\n`;
+    for (const m of messages) {
+      const role = m.role === 'user' ? '👤 You' : '🤖 AI';
+      text += `${role}:\n${m.content}\n\n`;
+    }
+    await safeSend(ctx, text.substring(0, 4000));
+  });
+
   return bot;
 }
+

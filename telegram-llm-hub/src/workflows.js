@@ -1,5 +1,6 @@
 import db from './db.js';
 import { llm } from './llm-manager.js';
+import { executeNode as runNode } from './node-runner.js';
 
 // Node types define what a node does
 export const NODE_TYPES = {
@@ -267,8 +268,8 @@ export const workflows = {
           }
         }
 
-        // Execute node based on type
-        const result = await this.executeNode(userId, node, inputData);
+        // Execute node via node-runner (each type is a separate function)
+        const result = await runNode(userId, node, inputData);
         nodeResults.set(node.id, result);
 
         this.updateNode(node.id, { status: 'done', result: JSON.stringify(result) });
@@ -741,7 +742,7 @@ ${node.node_type === 'merge' ? 'Combine all input values into one output.' : ''}
 
     const startTime = Date.now();
     try {
-      const result = await this.executeNode(userId, node, testInput);
+      const result = await runNode(userId, node, testInput);
       const duration = Date.now() - startTime;
       return {
         ok: true,
