@@ -15,6 +15,7 @@ import { costTracker } from './cost-tracker.js';
 import { gamification } from './gamification.js';
 import { templates } from './templates.js';
 import { vault } from './vault.js';
+import { collaboration } from './collaboration.js';
 import https from 'https';
 import http from 'http';
 import { writeFile, unlink } from 'fs/promises';
@@ -81,42 +82,59 @@ export function createBot(token) {
   });
 
   bot.command('help', async (ctx) => {
-    await ctx.reply(
+    await safeSend(ctx,
       `*Commands:*\n\n` +
       `*📋 Boards & Tasks:*\n` +
       `/new <name> — Create project board\n` +
-      `/boards — List boards | /board — Active board\n\n` +
+      `/boards — List boards\n` +
+      `/board — Active board\n` +
+      `/task <desc> — Add task to board\n` +
+      `/done <id> — Mark task done\n\n` +
       `*🔧 Workflows:*\n` +
-      `/workflow <desc> — Auto-generate workflow\n` +
-      `/wfnew <title> — Empty workflow\n` +
+      `/workflow <desc> — Auto-generate\n` +
+      `/wfnew <title> — Create empty\n` +
       `/wflist — List | /wfview — View\n` +
-      `/wfrun — Execute | /wffix — Auto-fix\n` +
+      `/wfrun — Execute | /wffix — Fix\n` +
+      `/wfdelete <id> — Delete workflow\n` +
       `/templates — Browse templates\n` +
-      `/usetemplate <id> — Use a template\n\n` +
+      `/usetemplate <id> — Use template\n\n` +
       `*💬 Chat & AI:*\n` +
-      `/chat — New session | /sessions — List\n` +
-      `/arena <prompt> — Battle providers\n` +
-      `/remember <key> <value> — Save to memory\n` +
-      `/recall <query> — Search memory\n` +
-      `/export — Export session\n\n` +
+      `/chat <title> — New session\n` +
+      `/sessions — List sessions\n` +
+      `/rename <title> — Rename session\n` +
+      `/clear — Clear session messages\n` +
+      `/export — Export session\n` +
+      `/arena <prompt> — Battle providers\n\n` +
+      `*🧠 Memory:*\n` +
+      `/remember <k> = <v> — Save\n` +
+      `/recall <query> — Search\n` +
+      `/forget <id> — Delete memory\n\n` +
       `*🤖 Providers:*\n` +
       `/providers — Manage LLMs\n` +
-      `/models — List all models\n` +
-      `/setkey <prov> <key> — Set API key\n` +
-      `/setmodel <prov> <model> — Change model\n` +
+      `/models — All models\n` +
+      `/setkey <prov> <key> — API key\n` +
+      `/setmodel <prov> <model> — Model\n` +
       `/test <prov> — Test connection\n\n` +
-      `*📊 Stats & More:*\n` +
+      `*📊 Stats & Gamification:*\n` +
       `/status — Quick overview\n` +
-      `/challenges — Daily challenges\n` +
-      `/costs — Usage costs\n` +
-      `/vault — Secret vault\n` +
-      `/vaultset <name> <value> — Store secret\n\n` +
+      `/stats — XP, level, badges\n` +
+      `/leaderboard — Top users\n` +
+      `/challenges — Daily quests\n` +
+      `/costs — Usage costs\n\n` +
+      `*🤝 Sharing:*\n` +
+      `/share <wf id> — Share workflow\n` +
+      `/unshare <wf id> — Unshare\n` +
+      `/browse — Public workflows\n` +
+      `/fork <token> — Fork shared\n\n` +
+      `*🔐 Vault:*\n` +
+      `/vault — View secrets\n` +
+      `/vaultset <k> <v> — Store secret\n` +
+      `/vaultdel <id> — Delete secret\n\n` +
       `*⚡ Shortcuts:*\n` +
       `/m — Main menu\n` +
       `/f <desc> — Quick feature\n` +
-      `/b <desc> — Quick bugfix\n\n` +
-      `*Tips:* Send photos for vision, voice for transcription, links for smart actions`,
-      { parse_mode: 'Markdown' }
+      `/b <desc> — Quick bugfix\n` +
+      `/ping — Check bot is alive`
     );
   });
 
@@ -2891,16 +2909,15 @@ IMPORTANT:
   });
 
   // ============================================================
-  // NEW COMMANDS — Memory, Arena, Challenges
+  // MEMORY COMMANDS
   // ============================================================
 
-  // /remember <key> = <value> — Save to knowledge base
   bot.command('remember', async (ctx) => {
     const userId = ctx.from.id;
     const text = ctx.message.text.replace('/remember', '').trim();
     const eqIndex = text.indexOf('=');
     if (eqIndex === -1) {
-      return await safeSend(ctx, '📝 Usage: `/remember key = value`\nExample: `/remember my stack = Python + FastAPI`');
+      return await safeSend(ctx, '📝 Usage: /remember key = value\nExample: /remember my stack = Python + FastAPI');
     }
     const key = text.substring(0, eqIndex).trim();
     const value = text.substring(eqIndex + 1).trim();
@@ -2908,17 +2925,17 @@ IMPORTANT:
 
     memory.set(userId, key, value);
     challenges.trackAction(userId, 'memory_added');
+    gamification.addXP(userId, 'memory_added');
     await safeSend(ctx, `🧠 Remembered: *${key}*`);
   });
 
-  // /recall <query> — Search knowledge base
   bot.command('recall', async (ctx) => {
     const userId = ctx.from.id;
     const query = ctx.message.text.replace('/recall', '').trim();
     if (!query) {
       const all = memory.list(userId);
-      if (!all.length) return await safeSend(ctx, '🧠 No memories stored. Use `/remember key = value`');
-      const list = all.slice(0, 10).map(m => `• *${m.key}*: ${m.value}`).join('\n');
+      if (!all.length) return await safeSend(ctx, '🧠 No memories stored yet.\nUse /remember key = value to save.');
+      const list = all.slice(0, 15).map(m => `• *${m.key}*: ${m.value}`).join('\n');
       return await safeSend(ctx, `🧠 *Knowledge Base* (${all.length} items)\n\n${list}`);
     }
     const results = memory.search(userId, query);
@@ -2927,110 +2944,171 @@ IMPORTANT:
     await safeSend(ctx, `🧠 Found ${results.length} match(es):\n\n${list}`);
   });
 
-  // /arena <prompt> — Start arena battle
+  bot.command('forget', async (ctx) => {
+    const userId = ctx.from.id;
+    const idStr = ctx.message.text.split(/\s+/)[1];
+    if (!idStr) return safeSend(ctx, '❌ Usage: /forget <memory_id>\nUse /recall to see your memories.');
+    try {
+      memory.delete(userId, parseInt(idStr));
+      await safeSend(ctx, '🗑 Memory deleted.');
+    } catch (err) {
+      await safeSend(ctx, `❌ ${err.message}`);
+    }
+  });
+
+  // ============================================================
+  // ARENA COMMANDS
+  // ============================================================
+
   bot.command('arena', async (ctx) => {
     const userId = ctx.from.id;
     const prompt = ctx.message.text.replace('/arena', '').trim();
-    if (!prompt) return await safeSend(ctx, '⚔️ Usage: `/arena <prompt>`\nSends to all enabled providers simultaneously');
+    if (!prompt) return await safeSend(ctx, '⚔️ Usage: /arena <prompt>\nSends to all enabled providers simultaneously.');
 
-    await ctx.reply('⚔️ Arena battle starting...');
+    await safeSend(ctx, '⚔️ Arena battle starting...');
     llm.initDefaults(userId);
 
     try {
       const result = await arena.battle(userId, prompt);
       let response = `⚔️ *Arena Battle*\n_${prompt}_\n\n`;
-      for (const [prov, r] of Object.entries(result.responses)) {
-        response += `*${prov}* (${r.latency || 0}ms):\n${r.error ? `❌ ${r.error}` : (r.reply || '').substring(0, 500)}\n\n`;
+      for (const [prov, r] of Object.entries(result.responses || {})) {
+        const snippet = r.error ? `❌ ${r.error}` : (r.reply || '').substring(0, 400);
+        response += `*${prov}* (${r.latency || 0}ms):\n${snippet}\n\n`;
       }
-      response += `Vote with: /vote ${result.id} <provider_name>`;
+      response += `Vote: /vote ${result.id} <provider>`;
       await safeSend(ctx, response);
     } catch (err) {
-      await ctx.reply(`❌ ${err.message}`);
+      await safeSend(ctx, `❌ Arena error: ${err.message}`);
     }
   });
 
-  // /vote <battle_id> <provider> — Vote for arena winner
   bot.command('vote', async (ctx) => {
     const parts = ctx.message.text.replace('/vote', '').trim().split(/\s+/);
-    if (parts.length < 2) return await safeSend(ctx, '👑 Usage: `/vote <battle_id> <provider>`');
+    if (parts.length < 2) return await safeSend(ctx, '👑 Usage: /vote <battle_id> <provider>');
     const [battleId, winner] = parts;
-    arena.vote(parseInt(battleId), winner);
-    await safeSend(ctx, `👑 Voted for *${winner}* in battle #${battleId}!`);
+    try {
+      arena.vote(parseInt(battleId), winner);
+      await safeSend(ctx, `👑 Voted for *${winner}* in battle #${battleId}!`);
+    } catch (err) {
+      await safeSend(ctx, `❌ ${err.message}`);
+    }
   });
 
-  // /challenges — View daily challenges
+  // ============================================================
+  // GAMIFICATION & CHALLENGES
+  // ============================================================
+
   bot.command('challenges', async (ctx) => {
     const userId = ctx.from.id;
     const daily = challenges.getDailyChallenges(userId);
     let msg = '🎯 *Daily Challenges*\n\n';
     for (const c of daily) {
       const status = c.completed ? '✅' : `${c.progress}/${c.target}`;
-      msg += `${c.completed ? '✅' : '⬜'} *${c.title}* — ${c.description} [${status}] (+${c.xp_reward}XP)\n`;
+      msg += `${c.completed ? '✅' : '⬜'} *${c.title}*\n  ${c.description} [${status}] +${c.xp_reward}XP\n`;
     }
     const streak = challenges.getStreak(userId);
     msg += `\n🔥 Streak: ${streak.streak} days`;
     await safeSend(ctx, msg);
   });
 
-  // /costs — View usage costs
-  bot.command('costs', async (ctx) => {
+  bot.command('stats', async (ctx) => {
     const userId = ctx.from.id;
-    const summary = costTracker.getSummary(userId, 30);
-    const t = summary.totals;
-    let msg = `💰 *Cost Summary (30 days)*\n\n`;
-    msg += `Total: $${(t?.total_cost || 0).toFixed(4)}\n`;
-    msg += `Requests: ${t?.request_count || 0}\n`;
-    msg += `Tokens: ${((t?.total_input || 0) + (t?.total_output || 0)).toLocaleString()}\n\n`;
-    if (summary.breakdown.length) {
-      msg += '*By Provider:*\n';
-      for (const r of summary.breakdown.slice(0, 5)) {
-        msg += `• ${r.provider} (${r.model}): $${r.total_cost.toFixed(4)} — ${r.request_count} requests\n`;
+    const stats = gamification.getStats(userId);
+    let msg = '🏆 *Your Stats*\n\n';
+    msg += `⭐ Level: ${stats.level || 1}\n`;
+    msg += `✨ XP: ${stats.xp || 0}\n`;
+    msg += `🔥 Streak: ${stats.streak || 0} days\n\n`;
+    if (stats.achievements && stats.achievements.length) {
+      msg += '*Achievements:*\n';
+      for (const a of stats.achievements.slice(0, 8)) {
+        msg += `🏅 ${a.name || a.title}\n`;
       }
     }
     await safeSend(ctx, msg);
   });
 
-  // /templates — Browse workflow templates
-  bot.command('templates', async (ctx) => {
-    const list = templates.list().slice(0, 10);
-    if (!list.length) return safeSend(ctx, '📦 No templates available yet.');
-    let msg = '📦 *Workflow Templates*\n\n';
-    for (const t of list) {
-      msg += `*${t.title}* — ${t.description || ''}\n`;
-      msg += `  ⭐ ${t.rating_avg?.toFixed(1) || 'N/A'} | Used ${t.use_count || 0}x | /usetemplate\\_${t.id}\n\n`;
+  bot.command('leaderboard', async (ctx) => {
+    const lb = gamification.getLeaderboard();
+    if (!lb || !lb.length) return safeSend(ctx, '🏆 No leaderboard data yet. Start chatting!');
+    let msg = '🏆 *Leaderboard — Top Users*\n\n';
+    const medals = ['🥇', '🥈', '🥉'];
+    for (let i = 0; i < lb.length; i++) {
+      const u = lb[i];
+      const prefix = medals[i] || `${i + 1}.`;
+      msg += `${prefix} Level ${u.level || 1} — ${u.xp || 0} XP (User ${u.user_id})\n`;
     }
     await safeSend(ctx, msg);
   });
 
-  // /usetemplate_<id> — Use a template
-  bot.onText?.call?.(bot, /\/usetemplate_(\d+)/, async (msg, match) => {}) || null;
+  // ============================================================
+  // COST TRACKING
+  // ============================================================
+
+  bot.command('costs', async (ctx) => {
+    const userId = ctx.from.id;
+    const summary = costTracker.getSummary(userId, 30);
+    const t = summary.totals;
+    let msg = '💰 *Cost Summary (30 days)*\n\n';
+    msg += `Total: $${(t?.total_cost || 0).toFixed(4)}\n`;
+    msg += `Requests: ${t?.request_count || 0}\n`;
+    msg += `Tokens: ${((t?.total_input || 0) + (t?.total_output || 0)).toLocaleString()}\n\n`;
+    if (summary.breakdown && summary.breakdown.length) {
+      msg += '*By Provider:*\n';
+      for (const r of summary.breakdown.slice(0, 5)) {
+        msg += `• ${r.provider} (${r.model}): $${r.total_cost.toFixed(4)} — ${r.request_count} reqs\n`;
+      }
+    }
+    await safeSend(ctx, msg);
+  });
+
+  // ============================================================
+  // TEMPLATES
+  // ============================================================
+
+  bot.command('templates', async (ctx) => {
+    const list = templates.list().slice(0, 10);
+    if (!list.length) return safeSend(ctx, '📦 No templates yet. Create one from a workflow via the dashboard.');
+    let msg = '📦 *Workflow Templates*\n\n';
+    for (const t of list) {
+      msg += `*${t.title}* (ID: ${t.id})\n`;
+      msg += `${t.description || 'No description'}\n`;
+      msg += `⭐ ${t.rating_avg?.toFixed(1) || 'N/A'} | Used ${t.use_count || 0}x\n\n`;
+    }
+    msg += 'Use: /usetemplate <id>';
+    await safeSend(ctx, msg);
+  });
+
   bot.command('usetemplate', async (ctx) => {
     const userId = ctx.from.id;
-    const idStr = ctx.message.text.split(/\s+/)[1];
-    if (!idStr) return safeSend(ctx, '❌ Usage: /usetemplate <id>');
+    llm.initDefaults(userId);
+    let idStr = ctx.message.text.replace(/^\/usetemplate[_ ]?/, '').trim();
+    if (!idStr) return safeSend(ctx, '❌ Usage: /usetemplate <id>\nBrowse templates with /templates');
     try {
       const result = templates.useTemplate(parseInt(idStr), userId);
       challenges.trackAction(userId, 'template_used');
+      gamification.addXP(userId, 'template_used');
       await safeSend(ctx, `✅ Created workflow from template! ID: ${result.workflowId}\nUse /wfview to see it.`);
     } catch (err) {
       await safeSend(ctx, `❌ ${err.message}`);
     }
   });
 
-  // /vault — View stored secrets
+  // ============================================================
+  // VAULT
+  // ============================================================
+
   bot.command('vault', async (ctx) => {
     const userId = ctx.from.id;
     const list = vault.list(userId);
     if (!list.length) return safeSend(ctx, '🔐 Vault is empty.\nUse /vaultset <name> <value> to store secrets.');
     let msg = '🔐 *Secret Vault*\n\n';
     for (const s of list) {
-      msg += `🔑 \`${s.key_name}\` — ${s.scope} ${s.description ? `(${s.description})` : ''}\n`;
+      msg += `🔑 ID ${s.id}: \`${s.key_name}\` — ${s.scope} ${s.description ? `(${s.description})` : ''}\n`;
     }
-    msg += '\nValues are encrypted. Use /vaultset to add or /vaultdel <id> to remove.';
+    msg += '\nUse /vaultset to add, /vaultdel <id> to remove.';
     await safeSend(ctx, msg);
   });
 
-  // /vaultset <name> <value> [description] — Store a secret
   bot.command('vaultset', async (ctx) => {
     const userId = ctx.from.id;
     const parts = ctx.message.text.split(/\s+/).slice(1);
@@ -3041,14 +3119,28 @@ IMPORTANT:
     try {
       vault.set(userId, keyName, value, 'global', description);
       await safeSend(ctx, `✅ Secret \`${keyName}\` stored securely.`);
-      // Delete the message with the secret for safety
       try { await ctx.deleteMessage(); } catch {}
     } catch (err) {
       await safeSend(ctx, `❌ ${err.message}`);
     }
   });
 
-  // /status — Quick overview of everything
+  bot.command('vaultdel', async (ctx) => {
+    const userId = ctx.from.id;
+    const idStr = ctx.message.text.split(/\s+/)[1];
+    if (!idStr) return safeSend(ctx, '❌ Usage: /vaultdel <id>\nUse /vault to see IDs.');
+    try {
+      vault.delete(userId, parseInt(idStr));
+      await safeSend(ctx, '✅ Secret deleted.');
+    } catch (err) {
+      await safeSend(ctx, `❌ ${err.message}`);
+    }
+  });
+
+  // ============================================================
+  // STATUS & PROVIDER COMMANDS
+  // ============================================================
+
   bot.command('status', async (ctx) => {
     const userId = ctx.from.id;
     llm.initDefaults(userId);
@@ -3058,19 +3150,24 @@ IMPORTANT:
     const costSummary = costTracker.getSummary(userId, 7);
     const daily = challenges.getDailyChallenges(userId);
     const completed = daily.filter(c => c.completed).length;
+    const stats = gamification.getStats(userId);
+    const wfList = workflows.listByUser(userId);
+    const boardList = boards.listByUser(userId);
 
     let msg = '📊 *Status Overview*\n\n';
     msg += `🤖 Providers: ${activeProvs}/${provs.length} active\n`;
+    msg += `⭐ Level: ${stats.level || 1} | XP: ${stats.xp || 0}\n`;
     msg += `🔥 Streak: ${streak.streak} days\n`;
-    msg += `🎯 Challenges: ${completed}/${daily.length} done today\n`;
+    msg += `🎯 Challenges: ${completed}/${daily.length} today\n`;
     msg += `💰 7-day cost: $${(costSummary.totals?.total_cost || 0).toFixed(4)}\n`;
     msg += `📨 7-day requests: ${costSummary.totals?.request_count || 0}\n`;
+    msg += `📋 Boards: ${boardList.length} | Workflows: ${wfList.length}\n`;
     await safeSend(ctx, msg);
   });
 
-  // /models — List all available models
   bot.command('models', async (ctx) => {
     const userId = ctx.from.id;
+    llm.initDefaults(userId);
     const provs = llm.getProviders(userId);
     let msg = '🧠 *Available Models*\n\n';
     for (const p of provs) {
@@ -3079,18 +3176,19 @@ IMPORTANT:
       const status = p.enabled ? (p.api_key || p.is_local ? '🟢' : '🟡') : '🔴';
       msg += `${status} *${p.display_name}*\n`;
       msg += `  Current: \`${p.model}\`\n`;
-      msg += `  Available: ${reg.models.slice(0, 4).map(m => `\`${m}\``).join(', ')}\n\n`;
+      msg += `  Options: ${reg.models.slice(0, 4).map(m => `\`${m}\``).join(', ')}\n\n`;
     }
-    msg += 'Use /setmodel <provider> <model> to change.';
+    msg += 'Change: /setmodel <provider> <model>';
     await safeSend(ctx, msg);
   });
 
-  // /setmodel <provider> <model> — Change a provider's model
   bot.command('setmodel', async (ctx) => {
     const userId = ctx.from.id;
+    llm.initDefaults(userId);
     const parts = ctx.message.text.split(/\s+/).slice(1);
     if (parts.length < 2) return safeSend(ctx, '❌ Usage: /setmodel <provider> <model>\nExample: /setmodel openai gpt-4.1');
-    const [provName, model] = parts;
+    const [provName, ...modelParts] = parts;
+    const model = modelParts.join(' ');
     try {
       llm.setModel(userId, provName, model);
       await safeSend(ctx, `✅ ${provName} model set to \`${model}\``);
@@ -3099,38 +3197,323 @@ IMPORTANT:
     }
   });
 
-  // /test <provider> — Test a provider connection
   bot.command('test', async (ctx) => {
     const userId = ctx.from.id;
+    llm.initDefaults(userId);
     const provName = ctx.message.text.split(/\s+/)[1];
-    if (!provName) return safeSend(ctx, '❌ Usage: /test <provider>\nExample: /test openai');
+    if (!provName) return safeSend(ctx, '❌ Usage: /test <provider>\nExample: /test claude');
     await safeSend(ctx, `🏓 Testing ${provName}...`);
     try {
       const result = await llm.testProvider(userId, provName);
       if (result.ok) {
-        await safeSend(ctx, `✅ ${provName} is working! (${result.latency}ms)`);
+        await safeSend(ctx, `✅ *${provName}* is working!\nLatency: ${result.latency}ms\nModel: ${result.model || 'N/A'}`);
       } else {
-        await safeSend(ctx, `❌ ${provName} failed: ${result.error}`);
+        await safeSend(ctx, `❌ *${provName}* failed: ${result.error}`);
       }
     } catch (err) {
       await safeSend(ctx, `❌ ${err.message}`);
     }
   });
 
-  // /export — Export current session as text
+  // ============================================================
+  // SESSION MANAGEMENT
+  // ============================================================
+
+  bot.command('rename', async (ctx) => {
+    const userId = ctx.from.id;
+    const title = ctx.message.text.replace('/rename', '').trim();
+    if (!title) return safeSend(ctx, '❌ Usage: /rename <new title>');
+    const session = sessions.getActive(userId);
+    if (!session) return safeSend(ctx, '❌ No active session. Use /chat first.');
+    try {
+      sessions.rename(session.id, title);
+      await safeSend(ctx, `✅ Session renamed to: *${title}*`);
+    } catch (err) {
+      await safeSend(ctx, `❌ ${err.message}`);
+    }
+  });
+
+  bot.command('clear', async (ctx) => {
+    const userId = ctx.from.id;
+    const session = sessions.getActive(userId);
+    if (!session) return safeSend(ctx, '❌ No active session.');
+    sessions.clearMessages(session.id);
+    await safeSend(ctx, '🗑 Session messages cleared. Start fresh!');
+  });
+
   bot.command('export', async (ctx) => {
     const userId = ctx.from.id;
     const session = sessions.getActive(userId);
     if (!session) return safeSend(ctx, '❌ No active session. Use /chat first.');
     const messages = sessions.getMessages(session.id);
+    if (!messages.length) return safeSend(ctx, '❌ Session is empty.');
     let text = `📝 Session: ${session.title}\n${'═'.repeat(30)}\n\n`;
     for (const m of messages) {
       const role = m.role === 'user' ? '👤 You' : '🤖 AI';
       text += `${role}:\n${m.content}\n\n`;
     }
-    await safeSend(ctx, text.substring(0, 4000));
+    // Send as document if too long
+    if (text.length > 4000) {
+      const buf = Buffer.from(text, 'utf-8');
+      await ctx.replyWithDocument({
+        source: buf,
+        filename: `session-${session.id}.txt`,
+      });
+    } else {
+      await safeSend(ctx, text);
+    }
+  });
+
+  // ============================================================
+  // BOARD TASK SHORTCUTS
+  // ============================================================
+
+  bot.command('task', async (ctx) => {
+    const userId = ctx.from.id;
+    const desc = ctx.message.text.replace('/task', '').trim();
+    if (!desc) return safeSend(ctx, '❌ Usage: /task <description>\nAdds a task to your active board.');
+    const state = userState.get(userId);
+    if (!state.active_board_id) return safeSend(ctx, '❌ No active board. Use /new <project> to create one.');
+    try {
+      boards.addTask(state.active_board_id, desc, '');
+      const tasks = boards.getTasks(state.active_board_id);
+      await safeSend(ctx, `✅ Task added! (${tasks.length} total)\nUse /board to view.`);
+    } catch (err) {
+      await safeSend(ctx, `❌ ${err.message}`);
+    }
+  });
+
+  bot.command('done', async (ctx) => {
+    const idStr = ctx.message.text.split(/\s+/)[1];
+    if (!idStr) return safeSend(ctx, '❌ Usage: /done <task_id>');
+    try {
+      boards.setTaskStatus(parseInt(idStr), 'done');
+      await safeSend(ctx, '✅ Task marked as done!');
+    } catch (err) {
+      await safeSend(ctx, `❌ ${err.message}`);
+    }
+  });
+
+  // ============================================================
+  // WORKFLOW EXTRAS
+  // ============================================================
+
+  bot.command('wfdelete', async (ctx) => {
+    const idStr = ctx.message.text.split(/\s+/)[1];
+    if (!idStr) return safeSend(ctx, '❌ Usage: /wfdelete <workflow_id>');
+    try {
+      workflows.delete(parseInt(idStr));
+      await safeSend(ctx, '🗑 Workflow deleted.');
+    } catch (err) {
+      await safeSend(ctx, `❌ ${err.message}`);
+    }
+  });
+
+  // ============================================================
+  // COLLABORATION / SHARING
+  // ============================================================
+
+  bot.command('share', async (ctx) => {
+    const userId = ctx.from.id;
+    const idStr = ctx.message.text.split(/\s+/)[1];
+    if (!idStr) return safeSend(ctx, '❌ Usage: /share <workflow_id>\nShares the workflow publicly.');
+    try {
+      const result = collaboration.share(parseInt(idStr), userId, true);
+      gamification.addXP(userId, 'workflow_shared');
+      await safeSend(ctx, `🤝 Workflow shared!\nToken: \`${result.share_token}\`\nOthers can fork it with: /fork ${result.share_token}`);
+    } catch (err) {
+      await safeSend(ctx, `❌ ${err.message}`);
+    }
+  });
+
+  bot.command('unshare', async (ctx) => {
+    const userId = ctx.from.id;
+    const idStr = ctx.message.text.split(/\s+/)[1];
+    if (!idStr) return safeSend(ctx, '❌ Usage: /unshare <workflow_id>');
+    try {
+      collaboration.unshare(parseInt(idStr), userId);
+      await safeSend(ctx, '✅ Workflow unshared.');
+    } catch (err) {
+      await safeSend(ctx, `❌ ${err.message}`);
+    }
+  });
+
+  bot.command('browse', async (ctx) => {
+    const list = collaboration.listPublic(10);
+    if (!list || !list.length) return safeSend(ctx, '📂 No public workflows yet. Be the first to /share!');
+    let msg = '📂 *Public Workflows*\n\n';
+    for (const s of list) {
+      msg += `*${s.title || 'Untitled'}*\n`;
+      msg += `  Token: \`${s.share_token}\`\n`;
+      msg += `  Fork: /fork ${s.share_token}\n\n`;
+    }
+    await safeSend(ctx, msg);
+  });
+
+  bot.command('fork', async (ctx) => {
+    const userId = ctx.from.id;
+    const token = ctx.message.text.split(/\s+/)[1];
+    if (!token) return safeSend(ctx, '❌ Usage: /fork <share_token>\nBrowse with /browse');
+    try {
+      const result = collaboration.fork(token, userId);
+      await safeSend(ctx, `✅ Workflow forked! New ID: ${result.id}\nUse /wfview to see it.`);
+    } catch (err) {
+      await safeSend(ctx, `❌ ${err.message}`);
+    }
+  });
+
+  bot.command('myshares', async (ctx) => {
+    const userId = ctx.from.id;
+    const list = collaboration.listByUser(userId);
+    if (!list || !list.length) return safeSend(ctx, '📂 No shared workflows. Use /share <id> to share one.');
+    let msg = '📂 *Your Shared Workflows*\n\n';
+    for (const s of list) {
+      msg += `• *${s.title || 'Untitled'}* — Token: \`${s.share_token}\`\n`;
+    }
+    await safeSend(ctx, msg);
+  });
+
+  // ============================================================
+  // UTILITY COMMANDS
+  // ============================================================
+
+  bot.command('ping', async (ctx) => {
+    const start = Date.now();
+    const msg = await ctx.reply('🏓 Pong!');
+    const latency = Date.now() - start;
+    try {
+      await ctx.telegram.editMessageText(
+        ctx.chat.id, msg.message_id, undefined,
+        `🏓 Pong! (${latency}ms)`
+      );
+    } catch {}
+  });
+
+  bot.command('id', async (ctx) => {
+    await safeSend(ctx, `👤 Your user ID: \`${ctx.from.id}\`\n💬 Chat ID: \`${ctx.chat.id}\``);
+  });
+
+  bot.command('dashboard', async (ctx) => {
+    await safeSend(ctx, `🌐 Dashboard: http://localhost:${process.env.DASHBOARD_PORT || 9999}\n\nOpen in your browser to access the full UI.`);
+  });
+
+  bot.command('ask', async (ctx) => {
+    const userId = ctx.from.id;
+    llm.initDefaults(userId);
+    const question = ctx.message.text.replace('/ask', '').trim();
+    if (!question) return safeSend(ctx, '❓ Usage: /ask <question>\nQuick one-shot question, no session context.');
+    try {
+      const result = await llm.chat(userId, [
+        { role: 'user', content: question },
+      ]);
+      let answer = (result.text || '').substring(0, 3800);
+      answer += `\n\n_via ${result.provider} (${result.model})_`;
+      await safeSend(ctx, answer);
+    } catch (err) {
+      await safeSend(ctx, `❌ ${err.message}`);
+    }
+  });
+
+  bot.command('summarize', async (ctx) => {
+    const userId = ctx.from.id;
+    llm.initDefaults(userId);
+    const session = sessions.getActive(userId);
+    if (!session) return safeSend(ctx, '❌ No active session.');
+    const messages = sessions.getMessages(session.id);
+    if (messages.length < 2) return safeSend(ctx, '❌ Not enough messages to summarize.');
+
+    await safeSend(ctx, '📝 Summarizing...');
+    const chatLog = messages.map(m => `${m.role}: ${m.content}`).join('\n').substring(0, 6000);
+    try {
+      const result = await llm.chat(userId, [
+        { role: 'system', content: 'Summarize this conversation concisely. Highlight key decisions, questions, and outcomes.' },
+        { role: 'user', content: chatLog },
+      ]);
+      await safeSend(ctx, `📝 *Session Summary*\n\n${(result.text || '').substring(0, 3500)}`);
+    } catch (err) {
+      await safeSend(ctx, `❌ ${err.message}`);
+    }
+  });
+
+  bot.command('translate', async (ctx) => {
+    const userId = ctx.from.id;
+    llm.initDefaults(userId);
+    const text = ctx.message.text.replace('/translate', '').trim();
+    if (!text) return safeSend(ctx, '🌐 Usage: /translate <text>\nTranslates to English. Add "to <lang>" at end for other languages.');
+
+    let targetLang = 'English';
+    let toTranslate = text;
+    const toMatch = text.match(/(.+?)\s+to\s+(\w+)$/i);
+    if (toMatch) {
+      toTranslate = toMatch[1];
+      targetLang = toMatch[2];
+    }
+
+    try {
+      const result = await llm.chat(userId, [
+        { role: 'system', content: `Translate the following text to ${targetLang}. Return only the translation.` },
+        { role: 'user', content: toTranslate },
+      ]);
+      await safeSend(ctx, `🌐 *Translation (${targetLang}):*\n\n${(result.text || '').substring(0, 3500)}`);
+    } catch (err) {
+      await safeSend(ctx, `❌ ${err.message}`);
+    }
+  });
+
+  bot.command('explain', async (ctx) => {
+    const userId = ctx.from.id;
+    llm.initDefaults(userId);
+    const text = ctx.message.text.replace('/explain', '').trim();
+    if (!text) return safeSend(ctx, '💡 Usage: /explain <concept or code>\nGet a clear explanation.');
+
+    try {
+      const result = await llm.chat(userId, [
+        { role: 'system', content: 'Explain the following clearly and concisely. Use examples if helpful. Keep it under 500 words.' },
+        { role: 'user', content: text },
+      ]);
+      await safeSend(ctx, `💡 *Explanation:*\n\n${(result.text || '').substring(0, 3500)}`);
+    } catch (err) {
+      await safeSend(ctx, `❌ ${err.message}`);
+    }
+  });
+
+  bot.command('code', async (ctx) => {
+    const userId = ctx.from.id;
+    llm.initDefaults(userId);
+    const text = ctx.message.text.replace('/code', '').trim();
+    if (!text) return safeSend(ctx, '💻 Usage: /code <description>\nGenerate code from a description.');
+
+    try {
+      const result = await llm.chat(userId, [
+        { role: 'system', content: 'Generate clean, production-ready code based on the description. Include brief comments. Return only the code.' },
+        { role: 'user', content: text },
+      ]);
+      await safeSend(ctx, `💻 *Generated Code:*\n\n${(result.text || '').substring(0, 3800)}`);
+    } catch (err) {
+      await safeSend(ctx, `❌ ${err.message}`);
+    }
+  });
+
+  bot.command('review', async (ctx) => {
+    const userId = ctx.from.id;
+    llm.initDefaults(userId);
+    // Check if replying to a message with code
+    const replyMsg = ctx.message.reply_to_message;
+    const codeText = replyMsg?.text || ctx.message.text.replace('/review', '').trim();
+    if (!codeText) return safeSend(ctx, '🔍 Usage: /review <code>\nOr reply to a code message with /review');
+
+    try {
+      const result = await llm.chat(userId, [
+        { role: 'system', content: 'Review this code. Point out bugs, security issues, performance problems, and suggest improvements. Be concise.' },
+        { role: 'user', content: codeText },
+      ]);
+      await safeSend(ctx, `🔍 *Code Review:*\n\n${(result.text || '').substring(0, 3500)}`);
+    } catch (err) {
+      await safeSend(ctx, `❌ ${err.message}`);
+    }
   });
 
   return bot;
 }
+
 

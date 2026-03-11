@@ -22,18 +22,36 @@ if (!token || token === 'YOUR_BOT_TOKEN_HERE') {
 } else {
   const bot = createBot(token);
 
-  bot.launch()
-    .then(() => {
-      console.log('\n\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501');
-      console.log('\u2705 Telegram LLM Hub is running!');
-      console.log(`\u2705 Dashboard: http://localhost:${DASHBOARD_PORT}`);
-      console.log('\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501');
-      console.log('Send /start to your bot to begin.\n');
+  // Verify token first, then start polling
+  bot.telegram.deleteWebhook({ drop_pending_updates: true })
+    .then(() => bot.telegram.getMe())
+    .then(me => {
+      console.log(`\ud83e\udd16 Bot: @${me.username} (ID: ${me.id})`);
+      // Fire-and-forget: launch() enters an infinite polling loop that
+      // never resolves in some environments. We don't await it.
+      bot.launch({
+        dropPendingUpdates: true,
+        allowedUpdates: ['message', 'callback_query'],
+      }).catch(err => {
+        // 409 = another instance polling, or polling restart issue
+        if (!err.message?.includes('409')) {
+          console.error('\u274c Bot polling error:', err.message);
+        }
+      });
+      console.log('\u2705 Bot polling started.');
     })
-    .catch((err) => {
-      console.error('\u274c Bot failed:', err.message);
+    .catch(err => {
+      console.error(`\u274c Bot token invalid or network error: ${err.message}`);
+      console.error('   Dashboard is still available.');
     });
 
+  console.log('\n\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501');
+  console.log('\u2705 Telegram LLM Hub is running!');
+  console.log(`\u2705 Dashboard: http://localhost:${DASHBOARD_PORT}`);
+  console.log('\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501');
+  console.log('Send /start to your bot to begin.\n');
+
+  // Graceful shutdown
   process.once('SIGINT', () => bot.stop('SIGINT'));
   process.once('SIGTERM', () => bot.stop('SIGTERM'));
 }
