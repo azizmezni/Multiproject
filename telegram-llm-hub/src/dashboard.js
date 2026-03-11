@@ -1154,10 +1154,18 @@ After the JSON array, add a markdown section starting with "---\\n**Knowledge & 
   plugins.scan().catch(err => console.log('Plugin scan:', err.message));
   scheduler.start();
 
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const server = app.listen(port, () => {
       console.log(`\u2705 Dashboard running at http://localhost:${port}`);
       resolve(server);
+    });
+    server.on('error', (err) => {
+      if (err.code === 'EADDRINUSE') {
+        console.error(`\u26a0\ufe0f  Dashboard port ${port} already in use — dashboard disabled, bot continues.`);
+        resolve(null);
+      } else {
+        reject(err);
+      }
     });
   });
 }
