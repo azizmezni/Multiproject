@@ -1,214 +1,260 @@
 # Telegram LLM Hub
 
-Multi-model AI assistant via Telegram with a gamified web dashboard, n8n-style workflow builder, project boards, automatic provider fallback, QA testing, and draft management.
-
-## Quick Setup
-
-1. **Create a Telegram Bot** via [@BotFather](https://t.me/BotFather) - send `/newbot` and copy the token
-2. Copy `.env.example` to `.env` and set your bot token and API keys
-3. Install & run:
-
-```bash
-cd telegram-llm-hub
-npm install
-npm start
-```
-
-4. Open the dashboard at **http://localhost:9999**
-5. Message your bot on Telegram and send `/start`
-
-> The dashboard works even without a Telegram bot token (dashboard-only mode).
+Multi-model AI assistant for Telegram with project boards, automated workflows, smart drafts, and a web dashboard. Chat with 15+ LLM providers, manage development tasks, and collaborate — all from Telegram.
 
 ## Features
 
-### Multi-LLM Chat with Fallback
-- Chat with 10 LLM providers through a single interface
-- Automatic fallback: if one provider hits a rate limit, the next one is tried
-- Reorderable provider list to set priority
-- Cloud providers fall back to local solutions (Ollama / LM Studio)
+- **Multi-LLM Chat** — Claude, OpenAI, Gemini, Mistral, Groq, DeepSeek, Grok, and 8 more providers with per-user configuration and fallback chains
+- **Project Boards** — Create Kanban-style boards with AI-generated tasks, input questions, and automated execution
+- **Workflow Engine** — Visual node-based workflows with 9 node types, auto-generation from descriptions, auto-fix, scheduling, and webhooks
+- **Smart Drafts** — Share any link and get intelligent actions: clone repos, summarize articles, generate tutorials, test APIs
+- **Dev Assistant** — Describe features or bugs in plain English, get AI-generated implementation plans with code
+- **Arena Mode** — Battle LLM providers head-to-head on the same prompt, vote for winners
+- **Knowledge Base** — Save and recall information across sessions with `/remember` and `/recall`
+- **Gamification** — XP system, daily challenges, streaks, achievements, and leaderboards
+- **Cost Tracking** — Per-provider usage and cost monitoring
+- **Secret Vault** — Securely store API keys and secrets for use in workflows
+- **Collaboration** — Share workflows publicly, fork others' workflows
+- **Voice Messages** — Whisper-powered transcription with AI responses
+- **Vision** — Send photos for AI analysis (supported providers)
+- **Web Dashboard** — Full-featured UI at `localhost:9999` with project management, workflow editor, and real-time execution
+- **Inline Queries** — Search boards and workflows from any Telegram chat
 
-### Web Dashboard (port 9999)
-- Dark-themed UI with glass-morphism and particle animations
-- 7 sections: Home, Providers, Boards, Workflows, Drafts, Chat, Achievements
-- Configure providers, API keys, and models from the browser
-- Full chat interface with session management
+## Quick Start
 
-### Gamification System
-- XP and leveling (10 levels from Novice to Ascended)
-- 15 achievements to unlock (First Steps, Board Master, Workflow Wizard, etc.)
-- Daily streak tracking
-- Progress ring and stats on the dashboard home
+### 1. Create a Telegram Bot
 
-### Project Boards (Trello-style)
-- AI auto-generates task boards from project descriptions
-- Kanban view with Pending / In Progress / Done columns
-- Tasks can require user input before execution
-- Execute mode runs all tasks sequentially with AI
-- QA testing per task (CLI tests + vision verification)
+1. Message [@BotFather](https://t.me/BotFather) on Telegram
+2. Send `/newbot` and follow the prompts
+3. Copy the bot token
 
-### Workflow Builder (n8n-style)
-- Visual node-based editor with drag-and-drop
-- 9 node types: Input, Process, Code, API, File, Decision, Output, CLI, Merge
-- Connect nodes by clicking output/input ports
-- Auto-generate workflows from natural language descriptions
-- **Node detail panel**: double-click a node to see a split view with:
-  - Left: node configuration (name, description, inputs, outputs)
-  - Right: generated code/prompt preview + test runner
-- Test individual nodes with custom JSON input and see results
-- Execute entire workflows with topological ordering
+### 2. Install & Configure
 
-### Draft Board
-- Share links in Telegram chat to save them to the draft board
-- Options: clone as board, generate plan, expand idea, run CLI commands
-
-### Vision Mode
-- Send photos to the Telegram bot for AI analysis
-- Vision fallback across providers that support it
-
-## Supported Providers
-
-### Cloud Providers
-
-| # | Provider | Docs | Models |
-|---|----------|------|--------|
-| 1 | **Anthropic Claude** | [docs.anthropic.com](https://docs.anthropic.com/en/docs/initial-setup) | claude-sonnet-4-20250514, claude-haiku-4-5-20251001, claude-opus-4-20250514 |
-| 2 | **OpenAI** | [platform.openai.com](https://platform.openai.com/docs/quickstart) | gpt-4o, gpt-4o-mini, gpt-4-turbo, o1, o1-mini |
-| 3 | **Google Gemini** | [ai.google.dev](https://ai.google.dev/gemini-api/docs/quickstart) | gemini-2.0-flash, gemini-2.0-pro, gemini-1.5-pro |
-| 4 | **Mistral AI** | [docs.mistral.ai](https://docs.mistral.ai/getting-started/quickstart/) | mistral-large-latest, mistral-medium-latest, codestral-latest |
-| 5 | **Groq** | [console.groq.com](https://console.groq.com/docs/quickstart) | llama-3.1-70b-versatile, llama-3.1-8b-instant, mixtral-8x7b-32768 |
-| 6 | **Cohere** | [docs.cohere.com](https://docs.cohere.com/docs/the-cohere-platform) | command-r-plus, command-r, command-light |
-| 7 | **DeepSeek** | [platform.deepseek.com](https://platform.deepseek.com/api-docs) | deepseek-chat, deepseek-coder, deepseek-reasoner |
-| 8 | **xAI Grok** | [docs.x.ai](https://docs.x.ai/docs/overview) | grok-2, grok-2-mini |
-
-### Local Providers (Fallback)
-
-| # | Provider | Docs | Setup |
-|---|----------|------|-------|
-| 9 | **Ollama** | [ollama.ai](https://ollama.ai/download) | Install Ollama, run `ollama pull llama3.1`, starts on port 11434 |
-| 10 | **LM Studio** | [lmstudio.ai](https://lmstudio.ai/docs) | Install LM Studio, download a model, start local server on port 1234 |
-
-## Setting API Keys
-
-**Option 1 - .env file:**
+```bash
+git clone https://github.com/azizmezni/Multiproject.git
+cd Multiproject/telegram-llm-hub
+npm install
 ```
+
+Create a `.env` file:
+
+```env
+TELEGRAM_BOT_TOKEN=your_bot_token_here
+DASHBOARD_PORT=9999
+
+# Add API keys for providers you want to use (all optional)
 ANTHROPIC_API_KEY=sk-ant-...
 OPENAI_API_KEY=sk-...
-GEMINI_API_KEY=AI...
+GEMINI_API_KEY=...
 ```
 
-**Option 2 - Telegram commands:**
-```
-/setkey openai sk-your-key-here
-/setkey gemini AIza-your-key-here
+### 3. Run
+
+```bash
+npm start        # Production
+npm run dev      # Development (auto-reload)
 ```
 
-**Option 3 - Dashboard UI:**
-Open http://localhost:9999, go to Providers, and click the key icon next to any provider.
+The bot will start polling Telegram and the dashboard will be available at `http://localhost:9999`.
 
-## Telegram Commands
+## Commands
+
+### Chat & AI
 
 | Command | Description |
 |---------|-------------|
-| `/start` | Welcome & setup |
-| `/chat [title]` | Start new chat session |
-| `/new <project>` | Create project board with AI-generated tasks |
-| `/boards` | List all project boards |
-| `/board` | View active board |
-| `/workflow` | View current workflow |
-| `/wfnew <description>` | Create workflow from description |
-| `/wflist` | List all workflows |
-| `/wfnode <name>` | Add a node to current workflow |
-| `/wfconnect <from> <to>` | Connect two nodes |
-| `/wfrun` | Execute current workflow |
+| `/start` | Welcome & quick start guide |
+| `/help` | Full command reference |
+| `/chat [title]` | Start a new chat session |
 | `/sessions` | List chat sessions |
-| `/drafts` | View draft board |
-| `/providers` | Manage & reorder LLM providers |
+| `/ask <question>` | Quick one-shot question (no session context) |
+| `/explain <text>` | Get a clear explanation of a concept or code |
+| `/code <desc>` | Generate code from a description |
+| `/review <code>` | Review code for issues (or reply to a message) |
+| `/translate <text>` | Translate text (add `to <lang>` for target language) |
+| `/summarize` | Summarize the current session |
+| `/rename <title>` | Rename current session |
+| `/clear` | Clear session messages |
+| `/export` | Export session as text |
+
+### Project Boards
+
+| Command | Description |
+|---------|-------------|
+| `/new <name>` | Create a project board |
+| `/boards` | List your boards |
+| `/board` | View active board |
+| `/task <desc>` | Add task to active board |
+| `/done <id>` | Mark task as done |
+
+### Workflows
+
+| Command | Description |
+|---------|-------------|
+| `/workflow <desc>` | Auto-generate a workflow from description |
+| `/wfnew <title>` | Create empty workflow |
+| `/wflist` | List workflows |
+| `/wfview` | View active workflow |
+| `/wfrun` | Execute workflow |
+| `/wffix` | Auto-fix failing nodes |
+| `/wfnode <wf_id> <type> <name>` | Add node manually |
+| `/wfconnect <from> <to>` | Connect two nodes |
+| `/wfinput <node_id> <inputs>` | Set node inputs |
+| `/wfoutput <node_id> <outputs>` | Set node outputs |
+| `/wfdelete <id>` | Delete a workflow |
+| `/templates` | Browse workflow templates |
+| `/usetemplate <id>` | Create workflow from template |
+
+### Dev Assistant
+
+| Command | Description |
+|---------|-------------|
+| `/feature <desc>` | Add a feature (AI-planned implementation) |
+| `/bugfix <desc>` | Fix a bug (AI-analyzed fix plan) |
+| `/f <desc>` | Quick feature shortcut |
+| `/b <desc>` | Quick bugfix shortcut |
+
+### LLM Providers
+
+| Command | Description |
+|---------|-------------|
+| `/providers` | Manage LLM providers (interactive menu) |
+| `/models` | View available models per provider |
 | `/setkey <provider> <key>` | Set API key for a provider |
-| `/settings` | Configuration menu |
-| `/qa <task_id>` | Run QA tests for a task |
-| `/run <command>` | Execute a CLI command |
-| `/menu` | Show main menu |
-| `/help` | Show help |
+| `/setmodel <provider> <model>` | Change active model |
+| `/test <provider>` | Test provider connection |
 
-## How Fallback Works
+### Memory & Knowledge
 
-Providers are tried in priority order (configurable via `/providers` or the dashboard):
+| Command | Description |
+|---------|-------------|
+| `/remember <key> = <value>` | Save to knowledge base |
+| `/recall [query]` | Search knowledge base (or list all) |
+| `/forget <id>` | Delete a memory |
 
-```
-Claude -> OpenAI -> Gemini -> Mistral -> Groq -> Cohere -> DeepSeek -> Grok -> Ollama -> LM Studio
-```
+### Arena & Gamification
 
-If Claude hits a rate limit, it automatically tries OpenAI, then Gemini, etc. When all cloud providers fail, it falls back to local solutions (Ollama/LM Studio). Reorder or disable providers at any time.
+| Command | Description |
+|---------|-------------|
+| `/arena <prompt>` | Battle all enabled providers simultaneously |
+| `/vote <battle_id> <provider>` | Vote for arena winner |
+| `/stats` | Your XP, level, badges |
+| `/challenges` | Daily challenge progress |
+| `/leaderboard` | Top users ranking |
+| `/costs` | Usage cost summary (30 days) |
 
-## Workflow Builder
+### Vault & Collaboration
 
-The workflow builder lets you create automation pipelines similar to n8n:
+| Command | Description |
+|---------|-------------|
+| `/vault` | View stored secrets |
+| `/vaultset <name> <value>` | Store a secret |
+| `/vaultdel <id>` | Delete a secret |
+| `/share <wf_id>` | Share a workflow publicly |
+| `/unshare <wf_id>` | Unshare a workflow |
+| `/browse` | Browse public workflows |
+| `/fork <token>` | Fork a shared workflow |
+| `/myshares` | List your shared workflows |
 
-1. **Create a workflow** - describe what it should do, or start empty
-2. **Add nodes** - each node has a type (process, code, API, etc.) with inputs and outputs
-3. **Connect nodes** - click an output port, then an input port to create a connection
-4. **Inspect nodes** - double-click a node to see its generated code/prompt and test it
-5. **Run the workflow** - nodes execute in topological order, passing data between connections
+### Utility
 
-### Node Types
+| Command | Description |
+|---------|-------------|
+| `/status` | Quick overview dashboard |
+| `/settings` | Open settings menu |
+| `/drafts` | View draft board |
+| `/ping` | Check bot latency |
+| `/id` | Show your user/chat ID |
+| `/dashboard` | Get dashboard URL |
+| `/menu` / `/m` | Main menu |
+| `/qa <task_id>` | Run QA tests on a task |
+| `/run <command>` | Execute a shell command |
 
-| Type | Description |
-|------|-------------|
-| **Input** | Starting data or user-provided values |
-| **Process** | LLM-powered text processing |
-| **Code** | JavaScript code execution |
-| **API** | HTTP requests to external services |
-| **File** | Read/write file operations |
-| **Decision** | Conditional branching |
-| **Output** | Final results |
-| **CLI** | Shell command execution |
-| **Merge** | Combine outputs from multiple nodes |
+## Supported Providers
 
-## Project Structure
+| Provider | Type | Highlights |
+|----------|------|------------|
+| **Anthropic Claude** | Cloud | Best-in-class reasoning and coding |
+| **OpenAI** | Cloud | GPT-4o, o3, o4-mini |
+| **Google Gemini** | Cloud | 1M+ token context, multimodal |
+| **Mistral AI** | Cloud | Fast European models, great for code |
+| **Groq** | Cloud | Ultra-fast LPU inference |
+| **DeepSeek** | Cloud | Strong coding, math, reasoning |
+| **xAI Grok** | Cloud | Real-time knowledge from X |
+| **Cohere** | Cloud | Enterprise RAG and search |
+| **OpenRouter** | Cloud | 200+ models, one API key |
+| **Together AI** | Cloud | Fast open-model serverless |
+| **Perplexity** | Cloud | Search-augmented with citations |
+| **Fireworks AI** | Cloud | Ultra-fast serverless |
+| **Cerebras** | Cloud | Fastest inference (wafer-scale) |
+| **Ollama** | Local | Run open models locally via CLI |
+| **LM Studio** | Local | Desktop app for local models |
+
+## Architecture
 
 ```
 telegram-llm-hub/
-  src/
-    index.js          # Entry point - starts bot + dashboard
-    bot.js            # Telegram bot handlers and commands
-    dashboard.js      # Express web server and REST API
-    db.js             # SQLite database schema and connection
-    providers.js      # 10 LLM provider implementations
-    llm-manager.js    # Provider fallback and routing logic
-    boards.js         # Project board and task management
-    workflows.js      # Workflow engine with node execution
-    sessions.js       # Chat session management
-    drafts.js         # Draft/link management
-    gamification.js   # XP, levels, achievements, streaks
-    qa.js             # QA testing (CLI + vision)
-    keyboards.js      # Telegram inline keyboard builders
-    settings.js       # User settings store
-    public/
-      index.html      # Dashboard SPA shell
-      app.js          # Dashboard frontend logic
-      styles.css      # Dark theme with animations
-  package.json
-  .env                # API keys and config (not committed)
+├── src/
+│   ├── index.js              # Entry point — starts bot + dashboard
+│   ├── bot.js                # Bot orchestrator — wires all handlers
+│   ├── bot-helpers.js        # Shared utilities (safeSend, stripMd, helpers factory)
+│   ├── handlers/
+│   │   ├── core.js           # /start, /help, /chat, /sessions, /settings, /status
+│   │   ├── boards.js         # Board & task commands + callbacks
+│   │   ├── workflows.js      # Workflow commands + auto-fix engine
+│   │   ├── drafts.js         # Smart link handling + draft actions
+│   │   ├── dev-assistant.js  # /feature, /bugfix + AI planning
+│   │   ├── providers.js      # Provider management commands + callbacks
+│   │   ├── ai-tools.js       # /ask, /explain, /code, /review, /translate
+│   │   ├── social.js         # Memory, arena, stats, vault, collaboration
+│   │   └── messages.js       # Catch-all: text, photo, voice, inline queries
+│   ├── dashboard.js          # Express web dashboard + REST API
+│   ├── db.js                 # SQLite database (better-sqlite3)
+│   ├── llm-manager.js        # Multi-provider LLM routing + fallback
+│   ├── providers.js          # 15 LLM provider implementations
+│   ├── sessions.js           # Chat session management
+│   ├── boards.js             # Board/task data layer
+│   ├── workflows.js          # Workflow engine + node execution
+│   ├── node-runner.js        # Sandboxed node script execution
+│   ├── drafts.js             # Draft management + link metadata
+│   ├── keyboards.js          # Telegram inline keyboard builders
+│   ├── arena.js              # Provider battle system
+│   ├── memory.js             # Knowledge base storage
+│   ├── gamification.js       # XP, levels, achievements
+│   ├── challenges.js         # Daily challenge system
+│   ├── cost-tracker.js       # Usage cost tracking
+│   ├── templates.js          # Workflow template marketplace
+│   ├── vault.js              # Secret storage
+│   ├── collaboration.js      # Workflow sharing + forking
+│   ├── scheduler.js          # Cron-based workflow scheduling
+│   ├── qa.js                 # QA testing + CLI runner
+│   ├── plugins.js            # Plugin system
+│   └── settings.js           # User settings management
+├── public/                   # Dashboard frontend (HTML/CSS/JS)
+├── data/                     # SQLite database files
+├── package.json
+└── .env                      # Configuration (not committed)
 ```
 
-## Environment Variables
+## Dashboard
 
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `TELEGRAM_BOT_TOKEN` | No* | Telegram bot token from @BotFather |
-| `ANTHROPIC_API_KEY` | No | Claude API key |
-| `OPENAI_API_KEY` | No | OpenAI API key |
-| `GEMINI_API_KEY` | No | Google Gemini API key |
-| `MISTRAL_API_KEY` | No | Mistral AI API key |
-| `GROQ_API_KEY` | No | Groq API key |
-| `COHERE_API_KEY` | No | Cohere API key |
-| `DEEPSEEK_API_KEY` | No | DeepSeek API key |
-| `XAI_API_KEY` | No | xAI Grok API key |
-| `OLLAMA_BASE_URL` | No | Ollama endpoint (default: http://localhost:11434) |
-| `LMSTUDIO_BASE_URL` | No | LM Studio endpoint (default: http://localhost:1234) |
-| `DASHBOARD_PORT` | No | Dashboard port (default: 9999) |
+Access the web dashboard at `http://localhost:9999` for:
 
-*Without a bot token, the app runs in dashboard-only mode.
+- **Boards** — Visual Kanban board management
+- **Workflows** — Node graph editor with drag-and-drop
+- **Chat** — Web-based chat interface
+- **Providers** — Visual provider configuration
+- **Drafts** — Link management and smart actions
+- **Projects** — Sub-project management with subdomain proxying
+- **Stats** — Usage analytics and cost breakdown
+
+## Tech Stack
+
+- **Runtime**: Node.js 18+
+- **Bot Framework**: [Telegraf](https://github.com/telegraf/telegraf) v4.16
+- **Database**: SQLite via [better-sqlite3](https://github.com/WiseLibs/better-sqlite3)
+- **Dashboard**: [Express](https://expressjs.com/) + vanilla HTML/CSS/JS
+- **Config**: [dotenv](https://github.com/motdotla/dotenv)
 
 ## License
 
