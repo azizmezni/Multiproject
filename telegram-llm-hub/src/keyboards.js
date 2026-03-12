@@ -11,7 +11,7 @@ const STATUS_EMOJI = {
 };
 
 const QA_EMOJI = {
-  pending: '\u23f3',   // hourglass
+  // pending: intentionally omitted — don't show anything for default state
   running: '\ud83d\udd04', // arrows
   pass: '\u2705',      // check
   fail: '\u274c',      // cross

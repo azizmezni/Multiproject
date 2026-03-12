@@ -1,4 +1,5 @@
 import { Telegraf } from 'telegraf';
+import db from './db.js';
 import { llm } from './llm-manager.js';
 import { sessions, userState } from './sessions.js';
 import { boards } from './boards.js';
@@ -32,6 +33,12 @@ import { registerMessages } from './handlers/messages.js';
 
 export function createBot(token) {
   const bot = new Telegraf(token);
+
+  // Self-heal: reset any boards stuck in 'executing' state from previous crash
+  try {
+    const fixed = db.prepare("UPDATE boards SET status = 'planning' WHERE status = 'executing'").run();
+    if (fixed.changes > 0) console.log(`\ud83d\udd27 Fixed ${fixed.changes} stuck board(s)`);
+  } catch { /* non-critical */ }
 
   // Shared dependency object — passed to all handler modules
   const pendingDevRequests = new Map();
