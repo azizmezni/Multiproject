@@ -157,6 +157,13 @@ try {
   db.exec("ALTER TABLE workflow_nodes ADD COLUMN custom_script TEXT DEFAULT NULL");
 }
 
+// Add output_type to tasks
+try {
+  db.prepare("SELECT output_type FROM tasks LIMIT 0").get();
+} catch {
+  db.exec("ALTER TABLE tasks ADD COLUMN output_type TEXT DEFAULT 'text'");
+}
+
 // Add webhook_id to workflows
 try {
   db.prepare("SELECT webhook_id FROM workflows LIMIT 0").get();

@@ -108,9 +108,9 @@ export const boards = {
     const tx = db.transaction(() => {
       for (let i = 0; i < taskList.length; i++) {
         const t = taskList[i];
-        const result = db.prepare(
-          'INSERT INTO tasks (board_id, title, description, position, requires_input, input_question, tools_needed) VALUES (?, ?, ?, ?, ?, ?, ?)'
-        ).run(boardId, t.title, t.description || '', i, t.requires_input ? 1 : 0, t.input_question || null, t.tools_needed ? JSON.stringify(t.tools_needed) : null);
+        db.prepare(
+          'INSERT INTO tasks (board_id, title, description, position, requires_input, input_question, tools_needed, output_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+        ).run(boardId, t.title, t.description || '', i, t.requires_input ? 1 : 0, t.input_question || null, t.tools_needed ? JSON.stringify(t.tools_needed) : null, t.output_type || 'text');
       }
     });
     tx();

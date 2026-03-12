@@ -201,39 +201,49 @@ export function createHelpers(shared) {
 
   async function executeBoard(ctx, userId, boardId) {
     const tasks = boards.getTasks(boardId);
-    let allDone = true;
     for (const task of tasks) {
       if (task.status === 'done') continue;
-      allDone = false;
       boards.setTaskStatus(task.id, 'in_progress');
-      await ctx.reply(`\ud83d\udd35 *Executing:* ${task.title}`, { parse_mode: 'Markdown' });
+      await safeSend(ctx, `\ud83d\udd35 *Executing:* ${task.title}`);
       try {
         const result = await llm.chat(userId, [
           {
             role: 'system',
-            content: `You are executing a project task. Provide the implementation or result.\nIf CLI commands are needed, list them clearly.\nTask: ${task.title}\nDescription: ${task.description}\n${task.input_answer ? `User Input: ${task.input_answer}` : ''}\n${task.tools_needed ? `Tools: ${task.tools_needed}` : ''}`
+            content: `You are executing a project task. Produce the concrete deliverable described below.
+
+Task: ${task.title}
+Execution Plan: ${task.description || 'No plan provided \u2014 use your best judgment.'}
+${task.input_answer ? `User Input: ${task.input_answer}` : ''}
+${task.output_type && task.output_type !== 'text' ? `Expected output type: ${task.output_type}` : ''}
+
+Generate the complete deliverable. Be thorough and detailed.`
           },
-          { role: 'user', content: `Execute this task and provide the result: ${task.title}` }
+          { role: 'user', content: `Execute: ${task.title}` }
         ]);
         boards.updateTask(task.id, { execution_log: result.text, status: 'done' });
         let output = result.text;
         if (output.length > 3000) output = output.substring(0, 3000) + '\n...(truncated)';
-        await ctx.reply(`\u2705 *Done:* ${task.title}\n\n${output}`, { parse_mode: 'Markdown' });
-        await ctx.reply(`\ud83e\uddea Running QA for: ${task.title}...`);
-        const qaResult = await qa.runTaskQA(userId, task.id);
-        const qaEmoji = qaResult.passed ? '\u2705' : '\u26a0\ufe0f';
-        await ctx.reply(`${qaEmoji} QA: ${qaResult.passed ? 'Passed' : 'Needs review'}`);
+        await safeSend(ctx, `\u2705 *Done:* ${task.title}\n\n${output}\n\n_via ${result.provider}_`);
       } catch (err) {
         boards.setTaskStatus(task.id, 'pending');
-        await ctx.reply(`\u274c Failed: ${task.title}\n${err.message}`);
+        await safeSend(ctx, `\u274c Failed: ${task.title}\n${err.message}`);
         break;
       }
     }
-    if (allDone || boards.getTasks(boardId).every(t => t.status === 'done')) {
-      boards.updateStatus(boardId, 'completed');
-      await ctx.reply(`\ud83c\udf89 *Board completed!* All tasks done.`, { parse_mode: 'Markdown' });
-    }
+
+    // Update board status based on final task states
     const finalTasks = boards.getTasks(boardId);
+    const allDone = finalTasks.every(t => t.status === 'done');
+    const anyPending = finalTasks.some(t => t.status === 'pending');
+
+    if (allDone) {
+      boards.updateStatus(boardId, 'completed');
+      await safeSend(ctx, `\ud83c\udf89 *Board completed!* All ${finalTasks.length} tasks done.`);
+    } else if (anyPending) {
+      boards.updateStatus(boardId, 'planning');
+      await safeSend(ctx, `\u26a0\ufe0f *Some tasks incomplete.* Tap Execute All or execute individual tasks.`);
+    }
+
     const board = boards.get(boardId);
     await ctx.reply('Board status:', kb.boardView(boardId, finalTasks, board.status));
   }

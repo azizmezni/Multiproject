@@ -80,7 +80,8 @@ export const kb = {
     }
 
     const actions = [];
-    if (boardStatus === 'planning') {
+    const hasUnfinished = tasks.some(t => t.status !== 'done');
+    if (hasUnfinished) {
       actions.push(Markup.button.callback('\u26a1 Execute All', `exec_board:${boardId}`));
     }
     actions.push(Markup.button.callback('\ud83d\udd04 Refresh', `view_board:${boardId}`));
@@ -94,20 +95,35 @@ export const kb = {
   taskDetail(task) {
     const buttons = [];
 
+    // AI execution — the primary action
     if (task.status === 'pending') {
-      buttons.push([Markup.button.callback('\u25b6\ufe0f Start Task', `start_task:${task.id}`)]);
+      buttons.push([Markup.button.callback('\u26a1 Execute Task', `exec_task:${task.id}`)]);
     }
     if (task.status === 'in_progress') {
-      buttons.push([Markup.button.callback('\u2705 Mark Done', `done_task:${task.id}`)]);
+      buttons.push([
+        Markup.button.callback('\u26a1 Execute Task', `exec_task:${task.id}`),
+        Markup.button.callback('\u2705 Mark Done', `done_task:${task.id}`),
+      ]);
     }
+    if (task.status === 'done' && task.execution_log) {
+      buttons.push([
+        Markup.button.callback('\ud83d\udd04 Re-execute', `reexec_task:${task.id}`),
+        Markup.button.callback('\ud83d\udcdc View Result', `view_log:${task.id}`),
+      ]);
+    }
+
+    // Input question
     if (task.requires_input && !task.input_answer) {
       buttons.push([Markup.button.callback('\u2753 Answer Question', `answer_task:${task.id}`)]);
     }
 
-    buttons.push([
-      Markup.button.callback('\ud83e\uddea Run QA', `qa_task:${task.id}`),
-      Markup.button.callback('\ud83d\udcac Discuss', `discuss_task:${task.id}`),
-    ]);
+    // Utilities
+    const utilRow = [Markup.button.callback('\ud83d\udcac Discuss', `discuss_task:${task.id}`)];
+    if (task.status === 'done') {
+      utilRow.unshift(Markup.button.callback('\ud83e\uddea Run QA', `qa_task:${task.id}`));
+    }
+    buttons.push(utilRow);
+
     buttons.push([Markup.button.callback('\u25c0\ufe0f Back to Board', `view_board:${task.board_id}`)]);
 
     return Markup.inlineKeyboard(buttons);

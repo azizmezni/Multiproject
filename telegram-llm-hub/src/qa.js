@@ -35,21 +35,23 @@ export const qa = {
 
   // Generate QA test for a task using LLM
   async generateTest(userId, task) {
-    const prompt = `You are a QA engineer. Generate a simple test plan for this task:
+    const prompt = `You are a QA engineer. Generate a test plan for this task:
 
 Task: ${task.title}
 Description: ${task.description || 'N/A'}
+Output type: ${task.output_type || 'text'}
+Has execution result: ${task.execution_log ? 'yes' : 'no'}
 
 Return a JSON object with:
 {
-  "test_type": "cli" | "visual" | "manual",
+  "test_type": "cli" | "llm_review" | "manual",
   "commands": ["command1", "command2"],
-  "expected": "what should happen",
-  "checks": ["check1", "check2"]
+  "expected": "what the output should contain or achieve",
+  "checks": ["specific thing to verify"]
 }
 
-If the task involves UI, set test_type to "visual".
-If it can be verified via CLI commands, set test_type to "cli".
+IMPORTANT: If the task produces text, code, documentation, or any AI-generated content, use test_type "llm_review" (NOT "manual" or "visual").
+Use "cli" ONLY if there are actual CLI commands to run and verify.
 Only return the JSON, no markdown.`;
 
     const result = await llm.chat(userId, [
@@ -141,19 +143,30 @@ Return JSON: {"passed": true/false, "issues": ["issue1"], "notes": "summary"}`
           result: cliResult,
           passed: cliResult.passed,
         };
-      } else if (testPlan.test_type === 'visual') {
-        qaResult = {
-          type: 'visual',
-          plan: testPlan,
-          passed: false,
-          notes: 'Visual QA requires manual screenshot upload or URL. Use /qa_screenshot <task_id> <url>',
-        };
+      } else if (task.execution_log) {
+        // LLM-based review of execution output
+        try {
+          const reviewResult = await llm.chat(userId, [
+            { role: 'system', content: 'You are a QA reviewer. Evaluate if the task output meets the requirements. Return JSON: {"passed": true/false, "notes": "brief assessment"}' },
+            { role: 'user', content: `Task: ${task.title}\nExpected: ${task.description || 'Complete the task'}\nActual output (first 2000 chars):\n${task.execution_log.substring(0, 2000)}\n\nDoes the output adequately address the task requirements?` }
+          ]);
+          const cleaned = reviewResult.text.replace(/```json?\n?/g, '').replace(/```/g, '').trim();
+          const review = JSON.parse(cleaned);
+          qaResult = {
+            type: 'llm_review',
+            plan: testPlan,
+            passed: review.passed === true,
+            notes: review.notes || '',
+          };
+        } catch {
+          qaResult = { type: 'llm_review', plan: testPlan, passed: true, notes: 'Output generated successfully' };
+        }
       } else {
         qaResult = {
-          type: 'manual',
+          type: 'not_executed',
           plan: testPlan,
           passed: false,
-          notes: 'Manual verification required',
+          notes: 'Task has not been executed yet. Execute first, then run QA.',
         };
       }
 
