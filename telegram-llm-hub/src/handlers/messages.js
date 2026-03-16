@@ -67,6 +67,14 @@ export function registerMessages(bot, shared) {
       return;
     }
 
+    // Handle self-improve input
+    if (state.awaiting_input === 'self_improve') {
+      userState.clearAwaiting(userId);
+      if (shared.handleSelfImprove) await shared.handleSelfImprove(ctx, userId, text);
+      else await ctx.reply('Self-improve not available.');
+      return;
+    }
+
     // Handle dev assistant inputs
     if (state.awaiting_input === 'dev_feature' || state.awaiting_input === 'dev_bugfix') {
       const type = state.awaiting_input === 'dev_feature' ? 'feature' : 'bugfix';

@@ -2172,6 +2172,150 @@ After the JSON array, add a markdown section starting with "---\\n**Knowledge & 
     res.json({ boards: boardResults, workflows: wfResults, drafts: draftResults });
   });
 
+  // ==================== SELF-IMPROVE ====================
+
+  const SI_SKIP_DIRS = new Set(['node_modules', '__pycache__', '.git', 'venv', '.venv', 'dist', 'build', '.cache']);
+  const SI_SKIP_EXT = new Set(['.db', '.db-shm', '.db-wal', '.lock', '.png', '.jpg', '.gif', '.ico', '.woff', '.woff2', '.ttf', '.pyc']);
+
+  async function collectSrcFiles(srcDir, baseDir) {
+    const files = [];
+    async function walk(dir) {
+      let entries;
+      try { entries = await readdir(dir, { withFileTypes: true }); } catch { return; }
+      for (const e of entries) {
+        if (SI_SKIP_DIRS.has(e.name)) continue;
+        const full = join(dir, e.name);
+        if (e.isDirectory()) { await walk(full); continue; }
+        const ext = e.name.substring(e.name.lastIndexOf('.'));
+        if (SI_SKIP_EXT.has(ext)) continue;
+        try {
+          const s = await stat(full);
+          if (s.size > 80000) continue;
+          const content = await readFile(full, 'utf-8');
+          const rel = full.replace(baseDir, '').replace(/\\/g, '/').replace(/^\//, '');
+          files.push({ path: rel, content: content.length > 5000 ? content.substring(0, 5000) + '\n...TRUNCATED...' : content });
+        } catch {}
+      }
+    }
+    await walk(srcDir);
+    return files;
+  }
+
+  // Self-improve: LLM modifies bot source code
+  app.post('/api/self-improve', async (req, res) => {
+    const userId = getUserId(req);
+    const { message } = req.body;
+    if (!message?.trim()) return res.status(400).json({ error: 'No message' });
+
+    const projectDir = process.cwd();
+    const srcDir = join(projectDir, 'src');
+
+    try {
+      const files = await collectSrcFiles(srcDir, projectDir + (projectDir.endsWith('/') || projectDir.endsWith('\\') ? '' : '/'));
+      if (files.length === 0) return res.status(500).json({ error: 'No source files found' });
+
+      let fileContext = '';
+      for (const f of files) {
+        fileContext += `--- ${f.path} ---\n${f.content}\n\n`;
+      }
+
+      llm.initDefaults(userId);
+      const result = await llm.chat(userId, [
+        {
+          role: 'system',
+          content: `You are a Node.js code generator modifying an existing project.
+
+SOURCE CODE:
+${fileContext}
+
+When making changes, output the COMPLETE modified source file using this format:
+
+===FILE: relative/path/to/file===
+complete file content here
+===ENDFILE===
+
+RULES:
+- Output the ENTIRE source code of each changed file
+- Only include files that actually need changes
+- Keep all existing functionality intact
+- Match the existing code style (ESM imports, async/await)
+- Brief explanation before the code blocks (1-2 sentences)
+- You CAN create new files or modify existing ones`
+        },
+        { role: 'user', content: message }
+      ]);
+
+      // Parse file blocks
+      const fixedFiles = [];
+      let match;
+      const r1 = /===FILE:\s*(.+?)\s*===\n([\s\S]*?)===ENDFILE===/g;
+      while ((match = r1.exec(result.text)) !== null) {
+        let p = match[1].trim().replace(/\\/g, '/');
+        if (p.includes('..') || p.startsWith('/')) continue;
+        fixedFiles.push({ path: p, content: match[2].trimEnd() + '\n' });
+      }
+      if (fixedFiles.length === 0) {
+        const r2 = /```([a-zA-Z0-9_\-./]+\.(?:py|js|ts|json|html|css|yml|yaml|md|bat|sh|jsx|tsx))\n([\s\S]*?)```/g;
+        while ((match = r2.exec(result.text)) !== null) {
+          let p = match[1].trim().replace(/\\/g, '/');
+          if (p.includes('..') || p.startsWith('/')) continue;
+          fixedFiles.push({ path: p, content: match[2].trimEnd() + '\n' });
+        }
+      }
+
+      // Safety: only allow files under src/ or root config files
+      const safeFiles = fixedFiles.filter(f => {
+        const p = f.path.toLowerCase();
+        return p.startsWith('src/') || p === 'package.json' || p === 'start.bat' || p === '.env.example';
+      });
+
+      // Write files
+      for (const f of safeFiles) {
+        const fullPath = join(projectDir, ...f.path.split('/'));
+        await fsMkdir(dirname(fullPath), { recursive: true });
+        await fsWriteFile(fullPath, f.content, 'utf-8');
+      }
+
+      // Clean response for display
+      let displayText = result.text
+        .replace(/===FILE:\s*.+?\s*===\n[\s\S]*?===ENDFILE===/g, '')
+        .replace(/```[a-zA-Z0-9_\-./]+\.(?:py|js|ts|json|html|css|yml|yaml|md|bat|sh|jsx|tsx)\n[\s\S]*?```/g, '')
+        .trim();
+      if (safeFiles.length > 0) {
+        if (!displayText) displayText = `Applied changes to ${safeFiles.length} file(s).`;
+        else displayText += `\n\nApplied changes to ${safeFiles.length} file(s).`;
+      }
+
+      // Store in DB
+      db.prepare('INSERT INTO self_improvements (user_id, request, files_changed, llm_response, provider) VALUES (?, ?, ?, ?, ?)')
+        .run(userId, message, JSON.stringify(safeFiles.map(f => f.path)), result.text.substring(0, 10000), result.provider || '');
+
+      res.json({
+        reply: displayText,
+        filesChanged: safeFiles.map(f => f.path),
+        provider: result.provider,
+        totalFiles: files.length,
+      });
+    } catch (err) {
+      console.error('[self-improve] ERROR:', err.message);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Self-improve history
+  app.get('/api/self-improve/history', (req, res) => {
+    const userId = getUserId(req);
+    const rows = db.prepare('SELECT id, request, files_changed, provider, created_at FROM self_improvements WHERE user_id = ? ORDER BY created_at DESC LIMIT 20').all(userId);
+    res.json(rows.map(r => ({ ...r, files_changed: JSON.parse(r.files_changed || '[]') })));
+  });
+
+  // Clear self-improve history
+  app.post('/api/self-improve/clear', (req, res) => {
+    const userId = getUserId(req);
+    db.prepare('DELETE FROM self_improvements WHERE user_id = ?').run(userId);
+    res.json({ ok: true });
+  });
+
   // ==================== FEATURE ROUTES (extracted to routes/features.js) ====================
   setUserIdResolver(getUserId);
   app.use('/api', featureRoutes);

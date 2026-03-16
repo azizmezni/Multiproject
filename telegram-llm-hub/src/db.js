@@ -340,6 +340,18 @@ db.exec(`
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
   CREATE INDEX IF NOT EXISTS idx_genproj_user ON gen_projects(user_id);
+
+  -- Self-Improvement History
+  CREATE TABLE IF NOT EXISTS self_improvements (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    request TEXT NOT NULL,
+    files_changed TEXT DEFAULT '[]',
+    llm_response TEXT DEFAULT '',
+    provider TEXT DEFAULT '',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+  CREATE INDEX IF NOT EXISTS idx_selfimprove_user ON self_improvements(user_id);
 `);
 
 export default db;

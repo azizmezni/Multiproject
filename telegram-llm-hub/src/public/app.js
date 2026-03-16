@@ -88,7 +88,7 @@ function showSection(name) {
   state.activeSection = name;
   document.querySelectorAll('.nav-btn').forEach(b => b.classList.toggle('active', b.dataset.section === name));
   const content = document.getElementById('content');
-  const renderers = { home: renderHome, providers: renderProviders, boards: renderGenProjects, workflows: renderWorkflows, drafts: renderDrafts, projects: renderProjects, chat: renderChat, achievements: renderAchievements, templates: renderTemplates, arena: renderArena, memory: renderMemory, costs: renderCosts, challenges: renderChallenges, vault: renderVault, plugins: renderPlugins, leaderboard: renderLeaderboard, collaboration: renderCollaboration };
+  const renderers = { home: renderHome, providers: renderProviders, boards: renderGenProjects, workflows: renderWorkflows, drafts: renderDrafts, projects: renderProjects, chat: renderChat, achievements: renderAchievements, templates: renderTemplates, arena: renderArena, memory: renderMemory, costs: renderCosts, challenges: renderChallenges, vault: renderVault, plugins: renderPlugins, leaderboard: renderLeaderboard, collaboration: renderCollaboration, selfimprove: renderSelfImprove };
   const fn = renderers[name];
   if (fn) fn(content);
 }
@@ -3035,4 +3035,173 @@ async function forkWorkflow(token) {
     showToast('🍴', `Forked! Workflow #${result.workflowId} created`);
     await refreshAll();
   } catch (err) { showToast('❌', err.message); }
+}
+
+// ===================== SELF-IMPROVE =====================
+let selfImproveHistory = [];
+
+async function renderSelfImprove(el) {
+  // Load history
+  try { selfImproveHistory = await GET('/self-improve/history'); } catch { selfImproveHistory = []; }
+
+  el.innerHTML = `
+    <div class="section-header">
+      <h2>🧬 Self-Improve</h2>
+      <p class="section-desc">Describe a feature or bug fix. The LLM will read all source files and apply changes automatically.</p>
+    </div>
+
+    <!-- Chat Interface -->
+    <div class="card" style="margin-bottom:16px">
+      <div class="card-header" style="display:flex;align-items:center;gap:8px">
+        <div class="card-title" style="margin:0">💬 Request</div>
+        <div style="margin-left:auto">
+          <button class="btn btn-xs" style="background:var(--bg3);font-size:11px" onclick="clearSelfImproveHistory()">Clear History</button>
+        </div>
+      </div>
+
+      <div id="si-messages" style="min-height:120px;max-height:500px;overflow-y:auto;padding:8px 0">
+        ${selfImproveHistory.length > 0
+          ? selfImproveHistory.slice().reverse().map(h => {
+              const files = h.files_changed || [];
+              const date = new Date(h.created_at).toLocaleString();
+              return `
+                <div style="padding:10px 12px;margin:4px 0;border-radius:6px;background:var(--bg3);border-left:3px solid var(--orange)">
+                  <div style="display:flex;justify-content:space-between;align-items:center">
+                    <div style="font-size:11px;color:var(--text2);font-weight:600">👤 You</div>
+                    <div style="font-size:10px;color:var(--text3)">${escapeHtml(date)}</div>
+                  </div>
+                  <div style="font-size:13px;margin-top:4px">${escapeHtml(h.request.substring(0, 200))}</div>
+                </div>
+                <div style="padding:10px 12px;margin:4px 0;border-radius:6px;background:rgba(0,255,255,0.04);border-left:3px solid var(--cyan)">
+                  <div style="font-size:11px;color:var(--text2);font-weight:600">🤖 AI</div>
+                  ${files.length > 0
+                    ? `<div style="margin-top:4px;padding:6px 10px;background:rgba(0,255,100,0.1);border-radius:4px;font-size:12px;color:var(--green)">
+                        ✅ Modified ${files.length} file(s): ${files.map(f => '<code>' + escapeHtml(f) + '</code>').join(', ')}
+                      </div>`
+                    : `<div style="font-size:12px;color:var(--text2);margin-top:4px">No file changes</div>`}
+                  ${h.provider ? `<div style="font-size:10px;color:var(--text3);margin-top:4px">via ${escapeHtml(h.provider)}</div>` : ''}
+                </div>`;
+            }).join('')
+          : `<div style="color:var(--text2);padding:24px;text-align:center;font-size:13px">
+              🧬 Tell me what to change about this bot.<br>
+              I'll read all source files and apply the fix.<br><br>
+              <span style="font-size:12px;color:var(--text3)">
+                Examples:<br>
+                "add /ping command that replies pong"<br>
+                "fix the terminal button not opening"<br>
+                "add export to JSON button on boards"
+              </span>
+            </div>`}
+      </div>
+
+      <div style="display:flex;gap:8px;padding-top:10px;border-top:1px solid var(--border)">
+        <input class="input" id="si-input" placeholder="Describe feature or bug fix..."
+               style="flex:1;font-size:14px;padding:10px 12px"
+               onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendSelfImprove()}">
+        <button class="btn btn-primary" id="si-send" onclick="sendSelfImprove()" style="padding:10px 20px;font-size:14px">🧬 Send</button>
+      </div>
+    </div>
+
+    <!-- Info -->
+    <div class="card" style="background:rgba(0,255,255,0.03)">
+      <div style="font-size:13px;color:var(--text2);line-height:1.6">
+        <b>How it works:</b><br>
+        1. Your request is sent to the LLM with all <code>src/</code> files as context<br>
+        2. The LLM generates modified source files<br>
+        3. Changes are written to disk automatically<br>
+        4. <b>Restart the bot</b> to apply changes<br><br>
+        <b>Safety:</b> Only files under <code>src/</code> can be modified. Database and config files are protected.
+      </div>
+    </div>
+  `;
+}
+
+async function sendSelfImprove() {
+  const input = document.getElementById('si-input');
+  const sendBtn = document.getElementById('si-send');
+  const msg = input.value.trim();
+  if (!msg) return;
+
+  input.value = '';
+  input.disabled = true;
+  sendBtn.disabled = true;
+  sendBtn.textContent = '⏳';
+
+  const messagesDiv = document.getElementById('si-messages');
+  // Remove placeholder
+  const placeholder = messagesDiv.querySelector('[style*="text-align:center"]');
+  if (placeholder) placeholder.remove();
+
+  // Show user message
+  messagesDiv.insertAdjacentHTML('beforeend', `
+    <div style="padding:10px 12px;margin:4px 0;border-radius:6px;background:var(--bg3);border-left:3px solid var(--orange)">
+      <div style="font-size:11px;color:var(--text2);font-weight:600">👤 You</div>
+      <div style="font-size:13px;margin-top:4px">${escapeHtml(msg)}</div>
+    </div>
+    <div id="si-thinking" style="padding:10px 12px;margin:4px 0;border-radius:6px;background:rgba(0,255,255,0.04);border-left:3px solid var(--cyan)">
+      <div style="font-size:11px;color:var(--text2);font-weight:600">🤖 AI</div>
+      <div style="font-size:13px;color:var(--text2)"><span style="animation:spin 2s linear infinite;display:inline-block">⚙️</span> Reading source files & generating changes...</div>
+    </div>`);
+  messagesDiv.scrollTop = messagesDiv.scrollHeight;
+
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 180000); // 3 min timeout
+
+    const res = await fetch('/api/self-improve', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: msg }),
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+
+    const contentType = res.headers.get('content-type') || '';
+    if (!contentType.includes('application/json')) {
+      throw new Error(`Server returned HTML instead of JSON (HTTP ${res.status}). Try refreshing.`);
+    }
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+
+    const thinking = document.getElementById('si-thinking');
+    if (thinking) {
+      let html = `<div style="font-size:11px;color:var(--text2);font-weight:600">🤖 AI</div>`;
+      if (data.reply) {
+        html += `<div style="font-size:13px;white-space:pre-wrap;line-height:1.5;margin-top:4px">${escapeHtml(data.reply)}</div>`;
+      }
+      if (data.filesChanged?.length > 0) {
+        html += `<div style="margin-top:8px;padding:8px 12px;background:rgba(0,255,100,0.1);border-radius:4px;font-size:12px;color:var(--green)">
+          ✅ Modified ${data.filesChanged.length} file(s): ${data.filesChanged.map(f => '<code>' + escapeHtml(f) + '</code>').join(', ')}
+        </div>
+        <div style="margin-top:6px;font-size:11px;color:var(--yellow)">⚠️ Restart the bot to apply changes</div>`;
+      }
+      if (data.provider) {
+        html += `<div style="font-size:10px;color:var(--text3);margin-top:4px">via ${escapeHtml(data.provider)} — scanned ${data.totalFiles || '?'} files</div>`;
+      }
+      thinking.innerHTML = html;
+    }
+    messagesDiv.scrollTop = messagesDiv.scrollHeight;
+  } catch (err) {
+    const thinking = document.getElementById('si-thinking');
+    if (thinking) {
+      thinking.innerHTML = `
+        <div style="font-size:11px;color:var(--text2);font-weight:600">🤖 AI</div>
+        <div style="font-size:13px;color:var(--red);margin-top:4px">❌ Error: ${escapeHtml(err.message)}</div>`;
+    }
+  }
+
+  input.disabled = false;
+  sendBtn.disabled = false;
+  sendBtn.textContent = '🧬 Send';
+  input.focus();
+}
+
+async function clearSelfImproveHistory() {
+  if (!confirm('Clear all self-improvement history?')) return;
+  try {
+    await POST('/self-improve/clear');
+    renderSelfImprove(document.getElementById('content'));
+  } catch (err) {
+    showToast('❌', err.message);
+  }
 }

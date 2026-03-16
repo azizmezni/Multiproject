@@ -30,6 +30,7 @@ import { registerProviders } from './handlers/providers.js';
 import { registerAITools } from './handlers/ai-tools.js';
 import { registerSocial } from './handlers/social.js';
 import { registerGenProjects } from './handlers/gen-projects.js';
+import { registerSelfImprove } from './handlers/self-improve.js';
 import { registerMessages } from './handlers/messages.js';
 
 export function createBot(token) {
@@ -69,6 +70,7 @@ export function createBot(token) {
   registerAITools(bot, shared);
   registerSocial(bot, shared);
   registerGenProjects(bot, shared);
+  registerSelfImprove(bot, shared);
   registerMessages(bot, shared);  // catch-all text handler — must be last
 
   // Register Telegram command menu (visible via / button)
