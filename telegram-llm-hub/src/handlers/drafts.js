@@ -1,5 +1,6 @@
 import { Markup } from 'telegraf';
 import { safeSend, stripMd } from '../bot-helpers.js';
+import { projectManager } from '../project-manager.js';
 
 export function registerDrafts(bot, shared) {
   const { llm, drafts, boards, kb, userState, qa, helpers } = shared;
@@ -140,6 +141,79 @@ export function registerDrafts(bot, shared) {
       await ctx.reply(`Board created: ${stripMd(plan.title)}\n${tasks.length} tasks generated!`, kb.boardView(board.id, tasks, 'planning'));
     } catch (err) {
       await ctx.reply(`Error creating board: ${err.message}`);
+    }
+  });
+
+  // --- Link → Project: create a gen_project from a shared link ---
+  bot.action(/draft_to_project:(\d+)/, async (ctx) => {
+    await ctx.answerCbQuery();
+    const draft = drafts.get(parseInt(ctx.match[1]));
+    if (!draft) return;
+    const userId = ctx.from.id;
+    llm.initDefaults(userId);
+
+    await ctx.editMessageText(`🚀 Creating project from: *${stripMd(draft.title || 'Link')}*...\n\n_Analyzing content and extracting keypoints..._`, { parse_mode: 'Markdown' });
+
+    try {
+      const pageContent = (draft.content || '').substring(0, 3000);
+      const result = await llm.chat(userId, [
+        {
+          role: 'system',
+          content: `You are a project architect. The user shared a link. Analyze its content and create a project based on it.
+
+Return a JSON object (no markdown fences):
+{
+  "title": "Short project name inspired by the link content",
+  "description": "2-3 sentence description of the project to build",
+  "tech_stack": "nodejs" or "python",
+  "keypoints": ["feature 1", "feature 2", ...],
+  "run_command": "node index.js" or "py main.py",
+  "install_command": "npm install" or "py -m pip install -r requirements.txt"
+}
+
+Rules:
+- 5-10 keypoints that turn this link's content into an actionable project
+- If it's a tutorial: turn steps into features to implement
+- If it's an API/docs: build a project that integrates with it
+- If it's a repo: build something similar or complementary
+- If it's an article: extract the core idea and make it buildable
+- Only return the JSON, nothing else`
+        },
+        { role: 'user', content: `Create a project from this link:\n\nURL: ${draft.url || 'N/A'}\nTitle: ${draft.title}\nDescription: ${draft.description || 'No description'}\n\nPage content:\n${pageContent}` }
+      ]);
+
+      let parsed;
+      try {
+        parsed = JSON.parse(result.text.replace(/```json?\n?/g, '').replace(/```/g, '').trim());
+      } catch {
+        parsed = {
+          title: draft.title || 'Link Project',
+          description: `Project inspired by ${draft.url || 'shared link'}`,
+          tech_stack: 'nodejs', keypoints: [draft.title || 'Implement project'],
+          run_command: 'node index.js', install_command: 'npm install'
+        };
+      }
+
+      const project = projectManager.create(
+        userId, parsed.title, parsed.description,
+        parsed.tech_stack, parsed.keypoints,
+        parsed.run_command, parsed.install_command
+      );
+
+      // Mark draft as processed
+      drafts.updateStatus(draft.id, 'processed');
+
+      let text = `🚀 *Project Created: ${stripMd(project.title)}*\n\n`;
+      text += `📝 ${stripMd(project.description)}\n\n`;
+      text += `⚙️ Tech: \`${project.tech_stack}\`\n`;
+      text += `🔗 Source: ${draft.url || 'N/A'}\n\n`;
+      text += `*Keypoints:*\n`;
+      project.keypoints.forEach((k, i) => { text += `${i + 1}. ${stripMd(k)}\n`; });
+      text += `\n_via ${result.provider}_`;
+
+      await safeSend(ctx, text, kb.projectView(project.id, project));
+    } catch (err) {
+      await ctx.reply(`❌ Error: ${err.message}`);
     }
   });
 

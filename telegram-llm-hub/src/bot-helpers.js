@@ -199,49 +199,114 @@ export function createHelpers(shared) {
     );
   }
 
+  /**
+   * Auto-execute all pending tasks in a board sequentially.
+   * Each task generates a standalone script/module.
+   * The last task integrates all previous outputs.
+   * Checks shared.runningBoards between tasks for pause support.
+   */
   async function executeBoard(ctx, userId, boardId) {
-    const tasks = boards.getTasks(boardId);
-    for (const task of tasks) {
-      if (task.status === 'done') continue;
-      boards.setTaskStatus(task.id, 'in_progress');
-      await safeSend(ctx, `\ud83d\udd35 *Executing:* ${task.title}`);
-      try {
-        const result = await llm.chat(userId, [
-          {
-            role: 'system',
-            content: `You are executing a project task. Produce the concrete deliverable described below.
+    const allTasks = boards.getTasks(boardId);
+    const completedOutputs = [];
 
-Task: ${task.title}
-Execution Plan: ${task.description || 'No plan provided \u2014 use your best judgment.'}
-${task.input_answer ? `User Input: ${task.input_answer}` : ''}
-${task.output_type && task.output_type !== 'text' ? `Expected output type: ${task.output_type}` : ''}
-
-Generate the complete deliverable. Be thorough and detailed.`
-          },
-          { role: 'user', content: `Execute: ${task.title}` }
-        ]);
-        boards.updateTask(task.id, { execution_log: result.text, status: 'done' });
-        let output = result.text;
-        if (output.length > 3000) output = output.substring(0, 3000) + '\n...(truncated)';
-        await safeSend(ctx, `\u2705 *Done:* ${task.title}\n\n${output}\n\n_via ${result.provider}_`);
-      } catch (err) {
-        boards.setTaskStatus(task.id, 'pending');
-        await safeSend(ctx, `\u274c Failed: ${task.title}\n${err.message}`);
-        break;
+    // Collect already-completed outputs for context
+    for (const t of allTasks) {
+      if (t.status === 'done' && t.execution_log) {
+        completedOutputs.push({ title: t.title, output: t.execution_log });
       }
     }
 
-    // Update board status based on final task states
+    for (let i = 0; i < allTasks.length; i++) {
+      const task = allTasks[i];
+      if (task.status === 'done') continue;
+
+      // Check if paused between tasks
+      if (!shared.runningBoards || shared.runningBoards.get(userId) !== boardId) {
+        boards.updateStatus(boardId, 'planning');
+        const tasks = boards.getTasks(boardId);
+        await ctx.reply('Board paused:', kb.boardView(boardId, tasks, 'planning'));
+        return;
+      }
+
+      boards.setTaskStatus(task.id, 'in_progress');
+      const progress = `[${completedOutputs.length + 1}/${allTasks.length}]`;
+      await safeSend(ctx, `\ud83d\udd35 *${progress} Executing:* ${task.title}\n\n_Generating script/module..._`);
+
+      try {
+        const isLastTask = !allTasks.slice(i + 1).some(t => t.status !== 'done');
+
+        let systemPrompt;
+        if (isLastTask && completedOutputs.length > 0) {
+          // Integration task — combine all previous scripts
+          const prevSummary = completedOutputs.map((o, idx) =>
+            `--- Module ${idx + 1}: ${o.title} ---\n${o.output.substring(0, 2000)}`
+          ).join('\n\n');
+
+          systemPrompt = `You are executing the FINAL integration task of a project. Previous tasks produced these modules:
+
+${prevSummary}
+
+Your job: ${task.title}
+Plan: ${task.description || 'Integrate all modules into a working system.'}
+${task.input_answer ? `User Input: ${task.input_answer}` : ''}
+
+Produce a COMPLETE integration script that imports/uses all previous modules. Include:
+- All imports and connections between modules
+- Configuration and setup
+- Main entry point
+- Error handling
+Make it production-ready and runnable.`;
+        } else {
+          // Regular task — generate standalone script/module
+          const prevContext = completedOutputs.length > 0
+            ? `\n\nCompleted modules so far:\n${completedOutputs.map(o => `- ${o.title}`).join('\n')}`
+            : '';
+
+          systemPrompt = `You are executing a project task. Generate a COMPLETE, STANDALONE script or module.
+
+Task: ${task.title}
+Execution Plan: ${task.description || 'No plan \u2014 use your best judgment.'}
+${task.input_answer ? `User Input: ${task.input_answer}` : ''}
+${task.output_type && task.output_type !== 'text' ? `Expected output type: ${task.output_type}` : ''}${prevContext}
+
+Requirements:
+- Generate a complete, self-contained script/module
+- Include all necessary imports and exports
+- Add error handling
+- Make it production-ready`;
+        }
+
+        const result = await llm.chat(userId, [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: `Execute: ${task.title}` }
+        ]);
+
+        boards.updateTask(task.id, { execution_log: result.text, status: 'done' });
+        completedOutputs.push({ title: task.title, output: result.text });
+
+        let output = result.text;
+        if (output.length > 3000) output = output.substring(0, 3000) + '\n...(truncated)';
+        await safeSend(ctx, `\u2705 *${progress} Done:* ${task.title}\n\n${output}\n\n_via ${result.provider}_`);
+      } catch (err) {
+        boards.setTaskStatus(task.id, 'pending');
+        await safeSend(ctx, `\u274c *Failed:* ${task.title}\n${err.message}\n\n\u23f8 Execution paused. Fix and retry.`);
+        shared.runningBoards?.delete(userId);
+        boards.updateStatus(boardId, 'planning');
+        const tasks = boards.getTasks(boardId);
+        await ctx.reply('Board status:', kb.boardView(boardId, tasks, 'planning'));
+        return;
+      }
+    }
+
+    // Final status update
     const finalTasks = boards.getTasks(boardId);
     const allDone = finalTasks.every(t => t.status === 'done');
-    const anyPending = finalTasks.some(t => t.status === 'pending');
 
     if (allDone) {
       boards.updateStatus(boardId, 'completed');
-      await safeSend(ctx, `\ud83c\udf89 *Board completed!* All ${finalTasks.length} tasks done.`);
-    } else if (anyPending) {
+      await safeSend(ctx, `\ud83c\udf89 *Project completed!* All ${finalTasks.length} tasks done.\n\nAll scripts generated and integrated.`);
+    } else {
       boards.updateStatus(boardId, 'planning');
-      await safeSend(ctx, `\u26a0\ufe0f *Some tasks incomplete.* Tap Execute All or execute individual tasks.`);
     }
 
     const board = boards.get(boardId);

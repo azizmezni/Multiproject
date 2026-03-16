@@ -29,6 +29,7 @@ import { registerDevAssistant } from './handlers/dev-assistant.js';
 import { registerProviders } from './handlers/providers.js';
 import { registerAITools } from './handlers/ai-tools.js';
 import { registerSocial } from './handlers/social.js';
+import { registerGenProjects } from './handlers/gen-projects.js';
 import { registerMessages } from './handlers/messages.js';
 
 export function createBot(token) {
@@ -42,12 +43,13 @@ export function createBot(token) {
 
   // Shared dependency object — passed to all handler modules
   const pendingDevRequests = new Map();
+  const runningBoards = new Map();   // userId → boardId, tracks which board is executing per user
   const shared = {
     llm, sessions, userState, boards, drafts, qa, kb,
     PROVIDER_REGISTRY, workflows, NODE_TYPES,
     memory, arena, challenges, costTracker, gamification,
     templates, vault, collaboration,
-    pendingDevRequests, stripMd, safeSend,
+    pendingDevRequests, runningBoards, stripMd, safeSend,
     draftUtils: { extractUrl, fetchLinkMeta, detectLinkType },
     helpers: null,          // set below
     handleDevRequest: null, // set by dev-assistant handler
@@ -66,6 +68,7 @@ export function createBot(token) {
   registerProviders(bot, shared);
   registerAITools(bot, shared);
   registerSocial(bot, shared);
+  registerGenProjects(bot, shared);
   registerMessages(bot, shared);  // catch-all text handler — must be last
 
   // Register Telegram command menu (visible via / button)
@@ -81,6 +84,9 @@ export function createBot(token) {
     { command: 'review', description: 'Review code for issues' },
     { command: 'translate', description: 'Translate text' },
     { command: 'summarize', description: 'Summarize current session' },
+    // Projects
+    { command: 'project', description: 'Create a project from an idea' },
+    { command: 'projects', description: 'List your projects' },
     // Boards
     { command: 'new', description: 'Create a project board' },
     { command: 'boards', description: 'List your boards' },

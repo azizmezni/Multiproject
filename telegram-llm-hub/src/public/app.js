@@ -4,6 +4,7 @@ let state = {
   providers: [],
   registry: [],
   boards: [],
+  genprojects: [],
   workflows: [],
   drafts: [],
   sessions: [],
@@ -47,7 +48,7 @@ async function refreshAll() {
     const results = await Promise.allSettled([
       GET('/stats'), GET('/providers'), GET('/boards'),
       GET('/workflows'), GET('/drafts'), GET('/sessions'), GET('/node-types'),
-      GET('/schedules'),
+      GET('/schedules'), GET('/gen'),
     ]);
     const val = (i, fallback) => results[i].status === 'fulfilled' ? results[i].value : fallback;
     state.stats = val(0, state.stats);
@@ -60,6 +61,7 @@ async function refreshAll() {
     state.sessions = val(5, state.sessions || []);
     state.nodeTypes = val(6, state.nodeTypes || {});
     state.schedules = val(7, state.schedules || []);
+    state.genprojects = val(8, state.genprojects || []);
     updateHeader();
   } catch (err) {
     console.error('Failed to refresh app state:', err);
@@ -86,7 +88,7 @@ function showSection(name) {
   state.activeSection = name;
   document.querySelectorAll('.nav-btn').forEach(b => b.classList.toggle('active', b.dataset.section === name));
   const content = document.getElementById('content');
-  const renderers = { home: renderHome, providers: renderProviders, boards: renderBoards, workflows: renderWorkflows, drafts: renderDrafts, projects: renderProjects, chat: renderChat, achievements: renderAchievements, templates: renderTemplates, arena: renderArena, memory: renderMemory, costs: renderCosts, challenges: renderChallenges, vault: renderVault, plugins: renderPlugins, leaderboard: renderLeaderboard, collaboration: renderCollaboration };
+  const renderers = { home: renderHome, providers: renderProviders, boards: renderGenProjects, workflows: renderWorkflows, drafts: renderDrafts, projects: renderProjects, chat: renderChat, achievements: renderAchievements, templates: renderTemplates, arena: renderArena, memory: renderMemory, costs: renderCosts, challenges: renderChallenges, vault: renderVault, plugins: renderPlugins, leaderboard: renderLeaderboard, collaboration: renderCollaboration };
   const fn = renderers[name];
   if (fn) fn(content);
 }
@@ -246,8 +248,687 @@ async function submitModel(name, model) {
   renderProviders(document.getElementById('content'));
 }
 
-// ===================== BOARDS =====================
-async function renderBoards(el) {
+// ===================== AI PROJECTS =====================
+async function renderGenProjects(el) {
+  await refreshAll();
+  el.innerHTML = `
+    <div class="section-title"><span class="icon">🚀</span> Projects <button class="btn btn-primary btn-sm" onclick="promptNewProject()" style="margin-left:auto">+ New Project</button></div>
+    ${state.genprojects.length === 0 ? '<div class="empty-state"><div class="empty-icon">🚀</div><h3>No projects yet</h3><p>Describe an idea and the AI will build it</p><button class="btn btn-primary" onclick="promptNewProject()">Create Project</button></div>' :
+      state.genprojects.map(p => {
+        const statusColors = { draft: 'blue', generating: 'orange', ready: 'green', running: 'cyan' };
+        const statusIcons = { draft: '📝', generating: '⚙️', ready: '✅', running: '▶️' };
+        return `<div class="card" style="cursor:pointer" onclick="viewGenProject(${p.id})">
+          <div class="card-header">
+            <div>
+              <div class="card-title">${escapeHtml(p.title)}</div>
+              <div class="card-subtitle">${escapeHtml(p.tech_stack)} · ${(p.keypoints||[]).length} features · ${escapeHtml(p.description||'').substring(0, 80)}</div>
+            </div>
+            <div style="display:flex;gap:6px;align-items:center">
+              <span class="badge badge-${statusColors[p.status] || 'blue'}">${statusIcons[p.status] || '📝'} ${escapeHtml(p.status)}</span>
+              <button class="btn btn-sm btn-danger" onclick="event.stopPropagation();deleteGenProject(${p.id})">🗑️</button>
+            </div>
+          </div>
+        </div>`;
+      }).join('')}`;
+}
+
+function promptNewProject() {
+  showModal('🚀 New Project', `
+    <div class="form-group">
+      <label class="form-label">Describe your project idea</label>
+      <textarea class="textarea" id="project-idea" rows="4" placeholder="e.g. A real-time chat application with rooms, user authentication, and message history..."></textarea>
+    </div>
+    <div class="btn-group">
+      <button class="btn btn-primary" onclick="createGenProject()">🤖 Generate Project Plan</button>
+      <button class="btn" onclick="closeModal()">Cancel</button>
+    </div>
+  `);
+}
+
+async function createGenProject() {
+  const idea = document.getElementById('project-idea').value.trim();
+  if (!idea) return;
+  closeModal();
+  const content = document.getElementById('content');
+  content.innerHTML = '<div class="empty-state"><div class="empty-icon" style="animation:spin 2s linear infinite">🤖</div><h3>Analyzing your idea...</h3><p>AI is breaking it into key features and recommending the best tech stack</p></div>';
+  try {
+    const result = await POST('/gen', { idea });
+    await refreshAll();
+    viewGenProject(result.project.id);
+  } catch (err) {
+    content.innerHTML = `<div class="empty-state"><div class="empty-icon">❌</div><h3>Error</h3><p>${escapeHtml(err.message)}</p></div>`;
+  }
+}
+
+async function deleteGenProject(id) {
+  if (!confirm('Delete this project?')) return;
+  await DEL(`/gen/${id}`);
+  await refreshAll();
+  renderGenProjects(document.getElementById('content'));
+}
+
+let projectPollInterval = null;
+function stopProjectPolling() { if (projectPollInterval) { clearInterval(projectPollInterval); projectPollInterval = null; } }
+
+async function viewGenProject(id) {
+  const proj = await GET(`/gen/${id}`);
+  if (!proj) return;
+  const content = document.getElementById('content');
+
+  // Auto-poll while generating
+  if (proj.status === 'generating' && !projectPollInterval) {
+    projectPollInterval = setInterval(() => viewGenProject(id), 3000);
+  } else if (proj.status !== 'generating') {
+    stopProjectPolling();
+  }
+
+  const kpList = (proj.keypoints || []).map((k, i) => `
+    <div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border)">
+      <span style="color:var(--cyan);font-weight:bold;min-width:20px">${i + 1}.</span>
+      <span style="flex:1">${escapeHtml(k)}</span>
+      <button class="btn btn-xs btn-danger" onclick="removeKeypoint(${id},${i})" style="font-size:10px;padding:1px 4px">✕</button>
+    </div>
+  `).join('');
+
+  content.innerHTML = `
+    <div class="section-title">
+      <span class="icon">🚀</span> ${escapeHtml(proj.title)}
+      <span class="badge badge-${proj.tech_stack === 'python' ? 'orange' : 'green'}" style="margin-left:8px">${escapeHtml(proj.tech_stack)}</span>
+      <span class="badge badge-blue" style="margin-left:4px">${escapeHtml(proj.status)}</span>
+      <div style="margin-left:auto;display:flex;gap:8px">
+        <button class="btn btn-sm" onclick="stopProjectPolling();renderGenProjects(document.getElementById('content'))">← Back</button>
+        <button class="btn btn-sm btn-danger" onclick="deleteGenProject(${id})">🗑️</button>
+      </div>
+    </div>
+
+    <p style="color:var(--text2);margin-bottom:16px">${escapeHtml(proj.description || '')}</p>
+
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+      <!-- Left: Keypoints -->
+      <div class="card" style="margin:0">
+        <div class="card-header">
+          <div class="card-title">🔑 Key Features (${(proj.keypoints||[]).length})</div>
+        </div>
+        <div style="padding:8px 0">${kpList || '<div style="color:var(--text2)">No keypoints yet</div>'}</div>
+        <div style="display:flex;gap:6px;margin-top:8px">
+          <input class="input" id="new-kp" placeholder="Add a feature..." style="flex:1" onkeydown="if(event.key==='Enter')addKeypoint(${id})">
+          <button class="btn btn-sm btn-primary" onclick="addKeypoint(${id})">+ Add</button>
+        </div>
+      </div>
+
+      <!-- Right: Info -->
+      <div class="card" style="margin:0">
+        <div class="card-header">
+          <div class="card-title">📋 Project Info</div>
+        </div>
+        <div style="padding:8px 0;font-size:13px">
+          <div style="margin-bottom:8px"><span style="color:var(--text2)">Tech:</span> <code>${escapeHtml(proj.tech_stack)}</code></div>
+          <div style="margin-bottom:8px"><span style="color:var(--text2)">Run:</span> <code>${escapeHtml(proj.run_command || 'not set')}</code></div>
+          <div style="margin-bottom:8px"><span style="color:var(--text2)">Install:</span> <code>${escapeHtml(proj.install_command || 'not set')}</code></div>
+          <div style="margin-bottom:8px"><span style="color:var(--text2)">Status:</span> <span class="badge badge-${proj.status === 'ready' ? 'green' : proj.status === 'running' ? 'blue' : 'orange'}">${escapeHtml(proj.status)}</span></div>
+          ${proj.project_path ? `<div style="margin-bottom:8px"><span style="color:var(--text2)">Path:</span> <code style="font-size:11px;word-break:break-all">${escapeHtml(proj.project_path)}</code></div>` : ''}
+          <div style="color:var(--text2)">Chat messages: ${(proj.chat_history||[]).length}</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Action buttons -->
+    <div class="card" id="project-actions-card" style="margin-top:16px;text-align:center">
+      ${proj.status === 'generating'
+        ? `<div><span style="animation:spin 2s linear infinite;display:inline-block">⚙️</span> <b>Generating project files...</b> This may take 30-60 seconds</div>`
+        : proj.status === 'ready' || proj.status === 'running'
+          ? `<div style="display:flex;gap:12px;justify-content:center;flex-wrap:wrap">
+              <button class="btn btn-primary" onclick="generateProject(${id})">🔄 Regenerate</button>
+              <button class="btn" style="background:var(--green);color:#000" onclick="viewGenFiles(${id})">📂 View Files</button>
+              <button class="btn" style="background:var(--yellow);color:#000" onclick="openProjectFolder(${id})">📁 Open Folder</button>
+              <button class="btn" style="background:#a78bfa;color:#000" onclick="openTerminal(${id})">🖥️ Terminal</button>
+              <button class="btn" style="background:#e879f9;color:#000" onclick="fixGenProject(${id})">🔧 Fix Bugs</button>
+              ${proj.status === 'running'
+                ? `<button class="btn" style="background:var(--red);color:#fff" onclick="stopGenProject(${id})">⏹ Stop</button>`
+                : `<button class="btn" style="background:var(--cyan);color:#000" onclick="runGenProject(${id})">▶️ Run Project</button>`}
+            </div>`
+          : `<button class="btn btn-primary" style="font-size:16px;padding:12px 32px" onclick="generateProject(${id})">⚡ Generate Project — create all files</button>
+             <div style="margin-top:8px;color:var(--text2)">The AI will generate a complete, runnable ${escapeHtml(proj.tech_stack)} project from your ${(proj.keypoints||[]).length} keypoints</div>`}
+    </div>
+
+    <!-- Output + Chat side by side (only when project is generated) -->
+    ${proj.status === 'ready' || proj.status === 'running' ? `
+    <div style="display:grid;grid-template-columns:1fr auto 1fr;gap:0;margin-top:16px">
+
+      <!-- Left: Run Output -->
+      <div class="card" style="margin:0;display:flex;flex-direction:column">
+        <div class="card-header" style="display:flex;align-items:center;gap:8px">
+          <div class="card-title" style="margin:0">📟 Output</div>
+          <div style="margin-left:auto">
+            <button class="btn btn-xs" style="background:var(--bg3);font-size:11px" onclick="clearRunLogs(${id})">Clear</button>
+          </div>
+        </div>
+        <pre id="run-logs" style="background:var(--bg1);padding:12px;border-radius:6px;flex:1;min-height:200px;max-height:450px;overflow:auto;font-size:12px;white-space:pre-wrap;margin:0;line-height:1.5">Loading logs...</pre>
+      </div>
+
+      <!-- Center: Send logs to chat arrow -->
+      <div style="display:flex;align-items:center;padding:0 4px">
+        <button class="btn" onclick="sendLogsToChat(${id})" title="Send last run output to Code Chat for LLM to fix"
+                style="background:var(--orange);color:#000;font-size:18px;padding:8px 6px;border-radius:8px;line-height:1;cursor:pointer;writing-mode:horizontal-tb">⇒</button>
+      </div>
+
+      <!-- Right: Code Chat -->
+      <div class="card" style="margin:0;display:flex;flex-direction:column">
+        <div class="card-header" style="display:flex;align-items:center;gap:8px">
+          <div class="card-title" style="margin:0">💬 Code Chat</div>
+          <div style="margin-left:auto">
+            <button class="btn btn-xs" style="background:var(--bg3);font-size:11px" onclick="clearCodeChat(${id})">Clear</button>
+          </div>
+        </div>
+        <div id="code-chat-messages" style="flex:1;min-height:200px;max-height:380px;overflow-y:auto;padding:4px 0">
+          ${(proj.chat_history || []).length > 0
+            ? (proj.chat_history || []).map(m => `
+              <div style="padding:8px 10px;margin:3px 0;border-radius:6px;background:${m.role === 'user' ? 'var(--bg3)' : 'rgba(0,255,255,0.04)'};border-left:3px solid ${m.role === 'user' ? 'var(--orange)' : 'var(--cyan)'}">
+                <div style="font-size:10px;color:var(--text2);margin-bottom:2px;font-weight:600">${m.role === 'user' ? '👤 You' : '🤖 AI'}</div>
+                <div style="font-size:12px;white-space:pre-wrap;line-height:1.4">${escapeHtml(m.content).substring(0, 2000)}</div>
+              </div>
+            `).join('')
+            : `<div style="color:var(--text2);padding:16px;text-align:center;font-size:12px">
+                💡 Talk to LLM to fix bugs.<br>It sees all project files.<br>
+                <span style="font-size:11px;color:var(--text3)">e.g. "main.py crashes on line 15"</span>
+              </div>`
+          }
+        </div>
+        <div style="display:flex;gap:6px;padding-top:8px;border-top:1px solid var(--border);margin-top:auto">
+          <input class="input" id="code-chat-input" placeholder="Describe bug or what to fix..." style="flex:1;font-size:13px;padding:8px 10px"
+                 onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendCodeChat(${id})}">
+          <button class="btn btn-primary" id="code-chat-send" onclick="sendCodeChat(${id})" style="padding:8px 16px;font-size:13px">Send</button>
+        </div>
+      </div>
+
+    </div>` : ''}
+  `;
+
+  // Always load persisted logs if project is generated
+  if (proj.status === 'running' || proj.status === 'ready') {
+    // Small delay to let DOM render the <pre> element first
+    setTimeout(async () => {
+      await loadProjectLogs(id);
+      // Show fallback if no logs at all
+      const el = document.getElementById('run-logs');
+      if (el && (!el.textContent || el.textContent === 'Loading logs...')) {
+        el.textContent = 'Click ▶️ Run Project to see output here.\nLogs persist between runs.';
+      }
+    }, 100);
+    if (proj.status === 'running' && !projectPollInterval) {
+      projectPollInterval = setInterval(() => loadProjectLogs(id), 2000);
+    }
+  }
+
+  // Scroll chat to bottom
+  const chatEl = document.getElementById('code-chat-messages');
+  if (chatEl) chatEl.scrollTop = chatEl.scrollHeight;
+}
+
+async function addKeypoint(id) {
+  const input = document.getElementById('new-kp');
+  const kp = input.value.trim();
+  if (!kp) return;
+  const proj = await GET(`/gen/${id}`);
+  const kps = [...(proj.keypoints || []), kp];
+  await PUT(`/gen/${id}/keypoints`, { keypoints: kps });
+  viewGenProject(id);
+}
+
+async function removeKeypoint(id, index) {
+  const proj = await GET(`/gen/${id}`);
+  const kps = (proj.keypoints || []).filter((_, i) => i !== index);
+  await PUT(`/gen/${id}/keypoints`, { keypoints: kps });
+  viewGenProject(id);
+}
+
+async function sendProjectChat(id) {
+  const input = document.getElementById('chat-msg');
+  const msg = input.value.trim();
+  if (!msg) return;
+  input.value = '';
+  input.disabled = true;
+
+  // Show user message immediately
+  const chatDiv = document.getElementById('project-chat');
+  chatDiv.innerHTML += `<div style="padding:8px;margin:4px 0;border-radius:6px;background:var(--bg3);border-left:3px solid var(--orange)"><div style="font-size:11px;color:var(--text2);margin-bottom:4px">👤 You</div><div style="font-size:13px">${escapeHtml(msg)}</div></div>`;
+  chatDiv.innerHTML += `<div style="padding:8px;color:var(--text2)">🤖 Thinking...</div>`;
+  chatDiv.scrollTop = chatDiv.scrollHeight;
+
+  try {
+    const result = await POST(`/gen/${id}/chat`, { message: msg });
+    viewGenProject(id); // Full refresh to show updated chat
+  } catch (err) {
+    chatDiv.innerHTML += `<div style="padding:8px;color:var(--red)">Error: ${escapeHtml(err.message)}</div>`;
+  }
+  input.disabled = false;
+}
+
+async function sendCodeChat(id) {
+  const input = document.getElementById('code-chat-input');
+  const sendBtn = document.getElementById('code-chat-send');
+  const msg = input.value.trim();
+  if (!msg) return;
+
+  input.value = '';
+  input.disabled = true;
+  sendBtn.disabled = true;
+  sendBtn.textContent = '⏳';
+
+  // Show user message immediately
+  const chatDiv = document.getElementById('code-chat-messages');
+  // Remove placeholder if present
+  const placeholder = chatDiv.querySelector('[style*="text-align:center"]');
+  if (placeholder) placeholder.remove();
+
+  chatDiv.insertAdjacentHTML('beforeend', `
+    <div style="padding:8px 10px;margin:3px 0;border-radius:6px;background:var(--bg3);border-left:3px solid var(--orange)">
+      <div style="font-size:10px;color:var(--text2);margin-bottom:2px;font-weight:600">👤 You</div>
+      <div style="font-size:12px;white-space:pre-wrap">${escapeHtml(msg.substring(0, 1000))}${msg.length > 1000 ? '...' : ''}</div>
+    </div>
+    <div id="code-chat-thinking" style="padding:8px 10px;margin:3px 0;border-radius:6px;background:rgba(0,255,255,0.04);border-left:3px solid var(--cyan)">
+      <div style="font-size:10px;color:var(--text2);margin-bottom:2px;font-weight:600">🤖 AI</div>
+      <div style="font-size:12px;color:var(--text2)"><span style="animation:spin 2s linear infinite;display:inline-block">⚙️</span> Analyzing project files & thinking...</div>
+    </div>`);
+  chatDiv.scrollTop = chatDiv.scrollHeight;
+
+  try {
+    // Truncate very long messages (e.g. pasted logs) to avoid payload issues
+    const truncMsg = msg.length > 10000 ? msg.substring(0, 10000) + '\n...(truncated)' : msg;
+    // Use a 120s timeout — LLM calls with full project context can be slow
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 120000);
+    let result;
+    try {
+      const res = await fetch(`/api/gen/${id}/code-chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: truncMsg }),
+        signal: controller.signal,
+      });
+      clearTimeout(timeout);
+      const contentType = res.headers.get('content-type') || '';
+      if (!contentType.includes('application/json')) {
+        throw new Error(`Server returned HTML instead of JSON (HTTP ${res.status}). Try refreshing the page.`);
+      }
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      result = data;
+    } catch (e) {
+      clearTimeout(timeout);
+      if (e.name === 'AbortError') throw new Error('Request timed out (120s). LLM may be slow or unresponsive.');
+      throw e;
+    }
+    // Remove thinking indicator and show response
+    const thinking = document.getElementById('code-chat-thinking');
+    if (thinking) {
+      let replyHtml = `
+        <div style="font-size:11px;color:var(--text2);margin-bottom:4px;font-weight:600">🤖 AI</div>
+        <div style="font-size:13px;white-space:pre-wrap;line-height:1.5">${escapeHtml(result.reply)}</div>`;
+      if (result.filesFixed?.length > 0) {
+        replyHtml += `<div style="margin-top:8px;padding:6px 10px;background:rgba(0,255,100,0.1);border-radius:4px;font-size:12px;color:var(--green)">✅ Applied fixes to: ${result.filesFixed.map(f => `<code>${escapeHtml(f)}</code>`).join(', ')}</div>`;
+      }
+      if (result.provider) {
+        replyHtml += `<div style="font-size:10px;color:var(--text3);margin-top:4px">via ${escapeHtml(result.provider)}</div>`;
+      }
+      thinking.innerHTML = replyHtml;
+    }
+    chatDiv.scrollTop = chatDiv.scrollHeight;
+  } catch (err) {
+    const thinking = document.getElementById('code-chat-thinking');
+    if (thinking) {
+      thinking.innerHTML = `
+        <div style="font-size:11px;color:var(--text2);margin-bottom:4px;font-weight:600">🤖 AI</div>
+        <div style="font-size:13px;color:var(--red)">❌ Error: ${escapeHtml(err.message)}</div>`;
+    }
+  }
+
+  input.disabled = false;
+  sendBtn.disabled = false;
+  sendBtn.textContent = 'Send';
+  input.focus();
+}
+
+async function clearCodeChat(id) {
+  try {
+    await POST(`/gen/${id}/clear-chat`);
+    viewGenProject(id);
+  } catch (err) {
+    showModal('Error', `<p>${escapeHtml(err.message)}</p><button class="btn" onclick="closeModal()">Close</button>`);
+  }
+}
+
+let _generatingLock = false;
+async function generateProject(id) {
+  // Prevent double-click
+  if (_generatingLock) return;
+  _generatingLock = true;
+
+  // Disable all generate/regenerate buttons immediately
+  document.querySelectorAll('button').forEach(btn => {
+    if (btn.textContent.includes('Generate') || btn.textContent.includes('Regenerate')) {
+      btn.disabled = true;
+      btn.style.opacity = '0.5';
+      btn.style.cursor = 'not-allowed';
+    }
+  });
+
+  // Show inline progress immediately
+  const content = document.getElementById('content');
+  const actionCard = content.querySelector('.card:last-of-type');
+  if (actionCard) {
+    actionCard.innerHTML = `
+      <div style="text-align:center;padding:24px">
+        <div style="font-size:40px;animation:spin 2s linear infinite;display:inline-block">⚙️</div>
+        <h3 style="margin:12px 0 4px">Generating Project Files...</h3>
+        <div id="gen-progress-text" style="color:var(--text2);font-size:13px">Sending to LLM — this may take 30-120 seconds</div>
+        <div style="margin-top:16px">
+          <div style="background:var(--bg1);border-radius:8px;height:8px;overflow:hidden;max-width:400px;margin:0 auto">
+            <div id="gen-progress-bar" style="height:100%;background:linear-gradient(90deg,var(--orange),var(--yellow));width:5%;transition:width 1s ease;border-radius:8px"></div>
+          </div>
+        </div>
+        <div style="margin-top:12px;font-size:11px;color:var(--text2)">💡 The AI generates all project files in a single pass</div>
+      </div>
+    `;
+  }
+
+  // Animate progress bar while waiting
+  let progressPercent = 5;
+  const progressInterval = setInterval(() => {
+    progressPercent = Math.min(progressPercent + Math.random() * 3, 90);
+    const bar = document.getElementById('gen-progress-bar');
+    const txt = document.getElementById('gen-progress-text');
+    if (bar) bar.style.width = `${progressPercent}%`;
+    if (txt) {
+      if (progressPercent < 20) txt.textContent = 'Sending to LLM — this may take 30-120 seconds';
+      else if (progressPercent < 40) txt.textContent = 'AI is analyzing your keypoints...';
+      else if (progressPercent < 60) txt.textContent = 'Generating project structure & files...';
+      else if (progressPercent < 80) txt.textContent = 'Writing code & configuration...';
+      else txt.textContent = 'Almost done — finalizing output...';
+    }
+  }, 2000);
+
+  try {
+    const result = await POST(`/gen/${id}/generate`);
+    clearInterval(progressInterval);
+    const bar = document.getElementById('gen-progress-bar');
+    if (bar) bar.style.width = '100%';
+    const txt = document.getElementById('gen-progress-text');
+    const warnMsg = result.warnings?.length ? ` — ${result.warnings[0]}` : '';
+    if (txt) txt.textContent = `✅ Done! ${result.files?.length || 0} file(s) created${warnMsg}`;
+    // Small delay so user sees the 100% bar
+    await new Promise(r => setTimeout(r, warnMsg ? 2500 : 800));
+  } catch (err) {
+    clearInterval(progressInterval);
+    const txt = document.getElementById('gen-progress-text');
+    if (txt) txt.textContent = `❌ Failed: ${err.message}`;
+    await new Promise(r => setTimeout(r, 2000));
+  }
+
+  _generatingLock = false;
+  viewGenProject(id);
+}
+
+async function viewGenFiles(id) {
+  const content = document.getElementById('content');
+  const data = await GET(`/gen/${id}/files`);
+  const proj = await GET(`/gen/${id}`);
+  if (!data.ok || !data.files?.length) {
+    showModal('📂 No Files', '<p>Project not generated yet.</p><button class="btn" onclick="closeModal()">Close</button>');
+    return;
+  }
+  content.innerHTML = `
+    <div class="section-title">
+      <span class="icon">📂</span> ${escapeHtml(proj.title)} — Files
+      <div style="margin-left:auto;display:flex;gap:8px">
+        <button class="btn btn-sm" onclick="viewGenProject(${id})">← Project</button>
+        <button class="btn btn-sm btn-primary" onclick="generateProject(${id})">🔄 Regenerate</button>
+      </div>
+    </div>
+    <div style="display:grid;grid-template-columns:250px 1fr;gap:16px;height:calc(100vh - 160px)">
+      <div class="card" style="overflow:auto;margin:0;padding:8px">
+        <div style="font-weight:bold;padding:8px;border-bottom:1px solid var(--border)">📁 ${data.files.length} files</div>
+        ${data.files.map(f => `
+          <div onclick="loadGenFile(${id},'${escapeAttr(f.path)}')" style="padding:6px 8px;cursor:pointer;border-radius:4px;font-family:monospace;font-size:12px;transition:background 0.2s"
+               onmouseover="this.style.background='var(--bg3)'" onmouseout="this.style.background='transparent'">
+            ${f.path.endsWith('.js') ? '🟨' : f.path.endsWith('.py') ? '🐍' : f.path.endsWith('.md') ? '📝' : f.path.endsWith('.json') ? '📋' : '📄'} ${escapeHtml(f.path)}
+          </div>
+        `).join('')}
+      </div>
+      <div class="card" id="gen-file-viewer" style="overflow:auto;margin:0;padding:16px">
+        <div class="empty-state"><div class="empty-icon">👈</div><h3>Select a file</h3></div>
+      </div>
+    </div>
+  `;
+}
+
+async function loadGenFile(id, path) {
+  const viewer = document.getElementById('gen-file-viewer');
+  viewer.innerHTML = '<div style="text-align:center;padding:20px">⏳ Loading...</div>';
+  try {
+    const data = await GET(`/gen/${id}/file?path=${encodeURIComponent(path)}`);
+    viewer.innerHTML = `
+      <div style="display:flex;justify-content:space-between;margin-bottom:12px;padding-bottom:8px;border-bottom:1px solid var(--border)">
+        <span style="font-family:monospace;font-weight:bold">${escapeHtml(path)}</span>
+        <span style="color:var(--text2);font-size:12px">${data.content.length} chars</span>
+      </div>
+      <pre style="background:var(--bg1);padding:12px;border-radius:6px;overflow:auto;font-size:12px;line-height:1.5;white-space:pre-wrap;border:1px solid var(--border);max-height:calc(100vh - 250px)">${escapeHtml(data.content)}</pre>
+    `;
+  } catch (err) {
+    viewer.innerHTML = `<div style="color:var(--red)">Error: ${escapeHtml(err.message)}</div>`;
+  }
+}
+
+async function runGenProject(id) {
+  try {
+    const result = await POST(`/gen/${id}/run`);
+    // Update buttons to show Stop instead of Run
+    await updateProjectButtons(id);
+    // Clear old "click to run" placeholder and start polling
+    const el = document.getElementById('run-logs');
+    if (el && (!el.textContent || el.textContent.includes('Click'))) {
+      el.textContent = '📦 Starting...\n';
+    }
+    if (!projectPollInterval) {
+      projectPollInterval = setInterval(() => loadProjectLogs(id), 2000);
+    }
+    // Load immediately
+    loadProjectLogs(id);
+  } catch (err) {
+    showModal('❌ Run Failed', `<p>${escapeHtml(err.message)}</p><button class="btn" onclick="closeModal()">Close</button>`);
+  }
+}
+
+async function stopGenProject(id) {
+  await POST(`/gen/${id}/stop`);
+  stopProjectPolling();
+  // Just update buttons, don't re-render (preserves logs)
+  const el = document.getElementById('run-logs');
+  const savedLogs = el?.textContent || '';
+  await updateProjectButtons(id, savedLogs);
+}
+
+async function openProjectFolder(id) {
+  try {
+    await POST(`/gen/${id}/open-folder`);
+  } catch (err) {
+    showModal('❌ Error', `<p>Could not open folder: ${escapeHtml(err.message)}</p><button class="btn" onclick="closeModal()">Close</button>`);
+  }
+}
+
+async function openTerminal(id) {
+  try {
+    await POST(`/gen/${id}/open-terminal`);
+  } catch (err) {
+    showModal('❌ Error', `<p>Could not open terminal: ${escapeHtml(err.message)}</p><button class="btn" onclick="closeModal()">Close</button>`);
+  }
+}
+
+let _fixingLock = false;
+async function fixGenProject(id) {
+  if (_fixingLock) return;
+  _fixingLock = true;
+
+  // Replace action buttons with progress UI
+  const content = document.getElementById('content');
+  const cards = content.querySelectorAll('.card');
+  const actionCard = cards[cards.length - 2]; // Action buttons card (before logs card)
+  if (actionCard) {
+    actionCard.innerHTML = `
+      <div style="text-align:center;padding:24px">
+        <div style="font-size:40px;animation:spin 2s linear infinite;display:inline-block">🔧</div>
+        <h3 style="margin:12px 0 4px">Auto-Fixing Project...</h3>
+        <div id="fix-progress-text" style="color:var(--text2);font-size:13px">Running project to detect errors...</div>
+        <div style="margin-top:16px">
+          <div style="background:var(--bg1);border-radius:8px;height:8px;overflow:hidden;max-width:400px;margin:0 auto">
+            <div id="fix-progress-bar" style="height:100%;background:linear-gradient(90deg,#e879f9,var(--cyan));width:10%;transition:width 1s ease;border-radius:8px"></div>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  let progressPercent = 10;
+  const progressInterval = setInterval(() => {
+    progressPercent = Math.min(progressPercent + Math.random() * 5, 90);
+    const bar = document.getElementById('fix-progress-bar');
+    const txt = document.getElementById('fix-progress-text');
+    if (bar) bar.style.width = `${progressPercent}%`;
+    if (txt) {
+      if (progressPercent < 30) txt.textContent = 'Running project to detect errors...';
+      else if (progressPercent < 50) txt.textContent = 'Crash detected — sending error to LLM for repair...';
+      else if (progressPercent < 70) txt.textContent = 'LLM is analyzing and fixing the code...';
+      else txt.textContent = 'Applying fixes and re-testing...';
+    }
+  }, 2000);
+
+  try {
+    const result = await POST(`/gen/${id}/fix`);
+    clearInterval(progressInterval);
+    const bar = document.getElementById('fix-progress-bar');
+    if (bar) bar.style.width = '100%';
+    const txt = document.getElementById('fix-progress-text');
+    if (result.ok) {
+      if (result.fixes?.length > 0) {
+        if (txt) txt.textContent = `✅ Fixed ${result.fixes.length} issue(s)! Files: ${result.filesFixed?.join(', ') || 'updated'}`;
+      } else {
+        if (txt) txt.textContent = '✅ No bugs found — project runs correctly!';
+      }
+    } else {
+      if (txt) txt.textContent = `⚠️ Some issues remain after ${result.fixes?.length || 0} fix attempt(s)`;
+    }
+    await new Promise(r => setTimeout(r, 2000));
+  } catch (err) {
+    clearInterval(progressInterval);
+    const txt = document.getElementById('fix-progress-text');
+    if (txt) txt.textContent = `❌ Fix failed: ${err.message}`;
+    await new Promise(r => setTimeout(r, 2000));
+  }
+
+  _fixingLock = false;
+  viewGenProject(id);
+}
+
+async function loadProjectLogs(id) {
+  try {
+    const data = await GET(`/gen/${id}/logs`);
+    const el = document.getElementById('run-logs');
+    if (el && data.logs && data.logs.trim()) {
+      el.textContent = data.logs;
+      el.scrollTop = el.scrollHeight;
+    }
+    // Don't replace existing logs with placeholder — only show placeholder
+    // if element is empty/has placeholder AND there's truly nothing from API
+    if (!data.running && projectPollInterval) {
+      stopProjectPolling();
+      // Prefer DOM content (visible to user), fallback to API response
+      const savedLogs = (el?.textContent && !el.textContent.includes('Click') && !el.textContent.includes('Loading'))
+        ? el.textContent
+        : (data.logs || '');
+      setTimeout(() => {
+        updateProjectButtons(id, savedLogs);
+      }, 500);
+    }
+  } catch {}
+}
+
+// Partial refresh: update only the action buttons without wiping logs/chat
+async function updateProjectButtons(id, preservedLogs) {
+  const proj = await GET(`/gen/${id}`);
+  if (!proj) return;
+
+  // Target the action card by ID
+  const card = document.getElementById('project-actions-card');
+  if (card) {
+    const isReady = proj.status === 'ready' || proj.status === 'running';
+    if (isReady) {
+      card.innerHTML = `<div style="display:flex;gap:12px;justify-content:center;flex-wrap:wrap">
+        <button class="btn btn-primary" onclick="generateProject(${id})">🔄 Regenerate</button>
+        <button class="btn" style="background:var(--green);color:#000" onclick="viewGenFiles(${id})">📂 View Files</button>
+        <button class="btn" style="background:var(--yellow);color:#000" onclick="openProjectFolder(${id})">📁 Open Folder</button>
+        <button class="btn" style="background:#a78bfa;color:#000" onclick="openTerminal(${id})">🖥️ Terminal</button>
+        <button class="btn" style="background:#e879f9;color:#000" onclick="fixGenProject(${id})">🔧 Fix Bugs</button>
+        ${proj.status === 'running'
+          ? `<button class="btn" style="background:var(--red);color:#fff" onclick="stopGenProject(${id})">⏹ Stop</button>`
+          : `<button class="btn" style="background:var(--cyan);color:#000" onclick="runGenProject(${id})">▶️ Run Project</button>`}
+      </div>`;
+    }
+  }
+
+  // Update status badge
+  const badges = document.querySelectorAll('.badge-blue');
+  for (const b of badges) {
+    if (['draft', 'generating', 'ready', 'running'].includes(b.textContent.trim())) {
+      b.textContent = proj.status;
+    }
+  }
+
+  // Re-apply preserved logs
+  if (preservedLogs) {
+    const el = document.getElementById('run-logs');
+    if (el) {
+      el.textContent = preservedLogs;
+      el.scrollTop = el.scrollHeight;
+    }
+  }
+}
+
+async function clearRunLogs(id) {
+  try {
+    await POST(`/gen/${id}/clear-logs`);
+    const el = document.getElementById('run-logs');
+    if (el) el.textContent = 'Logs cleared.';
+  } catch {}
+}
+
+function sendLogsToChat(id) {
+  const el = document.getElementById('run-logs');
+  if (!el) return;
+  const fullLogs = el.textContent || '';
+  if (!fullLogs.trim() || fullLogs.includes('Click') || fullLogs === 'Loading logs...') {
+    return; // nothing to send
+  }
+
+  // Extract only the LAST run (after the last separator)
+  const separator = '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━';
+  const parts = fullLogs.split(separator);
+  const lastRun = parts.length > 1 ? parts[parts.length - 1].trim() : fullLogs.trim();
+
+  // Truncate if too long
+  const logSnippet = lastRun.length > 3000 ? lastRun.substring(lastRun.length - 3000) : lastRun;
+
+  // Put it in the chat input with a prefix
+  const input = document.getElementById('code-chat-input');
+  if (input) {
+    input.value = `Here is the output from the last run, fix the errors:\n\n${logSnippet}`;
+    input.focus();
+    // Auto-send
+    sendCodeChat(id);
+  }
+}
+
+// ===================== OLD BOARDS (legacy) =====================
+async function renderOldBoards(el) {
   await refreshAll();
   el.innerHTML = `
     <div class="section-title"><span class="icon">📋</span> Project Boards <button class="btn btn-primary btn-sm" onclick="promptNewBoard()" style="margin-left:auto">+ New Board</button></div>
@@ -256,12 +937,24 @@ async function renderBoards(el) {
         const tasks = b.tasks || [];
         const done = tasks.filter(t => t.status === 'done').length;
         const pct = tasks.length > 0 ? Math.round((done / tasks.length) * 100) : 0;
-        return `<div class="card" onclick="viewBoard(${b.id})" style="cursor:pointer">
-          <div class="card-header">
-            <div><div class="card-title">${escapeHtml(b.title)}</div><div class="card-subtitle">${tasks.length} tasks · ${escapeHtml(b.status)}</div></div>
-            <div class="badge badge-${b.status === 'completed' ? 'green' : b.status === 'executing' ? 'orange' : 'blue'}">${pct}%</div>
+        const isRunning = b.status === 'executing';
+        const hasUnfinished = tasks.some(t => t.status !== 'done');
+        return `<div class="card" style="cursor:pointer">
+          <div onclick="viewBoard(${b.id})">
+            <div class="card-header">
+              <div><div class="card-title">${escapeHtml(b.title)}</div><div class="card-subtitle">${tasks.length} tasks · ${done} done · ${escapeHtml(b.status)}</div></div>
+              <div class="badge badge-${b.status === 'completed' ? 'green' : isRunning ? 'orange' : 'blue'}">${pct}%</div>
+            </div>
+            <div style="height:4px;background:var(--bg3);border-radius:2px;overflow:hidden;margin-bottom:8px"><div style="height:100%;width:${pct}%;background:linear-gradient(90deg,var(--cyan),var(--green));border-radius:2px;transition:width 0.5s"></div></div>
           </div>
-          <div style="height:4px;background:var(--bg3);border-radius:2px;overflow:hidden"><div style="height:100%;width:${pct}%;background:linear-gradient(90deg,var(--cyan),var(--green));border-radius:2px;transition:width 0.5s"></div></div>
+          <div style="display:flex;gap:6px;justify-content:flex-end">
+            ${isRunning
+              ? `<button class="btn btn-sm" style="background:var(--orange);color:#000" onclick="event.stopPropagation();pauseBoard(${b.id})">⏸ Pause</button>`
+              : hasUnfinished
+                ? `<button class="btn btn-sm btn-primary" onclick="event.stopPropagation();runBoard(${b.id})">▶️ Run</button>`
+                : `<span class="badge badge-green" style="padding:4px 8px">✅ Complete</span>`}
+            <button class="btn btn-sm btn-danger" onclick="event.stopPropagation();deleteBoard(${b.id})">🗑️</button>
+          </div>
         </div>`;
       }).join('')}`;
 }
@@ -289,22 +982,51 @@ async function createBoard(auto) {
   else renderBoards(content);
 }
 
+let boardPollInterval = null;
+function stopBoardPolling() { if (boardPollInterval) { clearInterval(boardPollInterval); boardPollInterval = null; } }
+
 async function viewBoard(boardId) {
   const data = await GET(`/boards/${boardId}`);
   if (!data.board) return;
   const { board, tasks, pending, inProgress, done, needsInput } = data;
   const content = document.getElementById('content');
+  const isRunning = board.status === 'executing';
+  const hasUnfinished = pending.length + inProgress.length > 0;
+
+  // Auto-poll while executing
+  if (isRunning && !boardPollInterval) {
+    boardPollInterval = setInterval(() => viewBoard(boardId), 3000);
+  } else if (!isRunning) {
+    stopBoardPolling();
+  }
+
+  const isComplete = board.status === 'completed' || (!hasUnfinished && done.length > 0);
 
   content.innerHTML = `
     <div class="section-title">
       <span class="icon">📋</span> ${escapeHtml(board.title)}
-      <span class="badge badge-${board.status === 'completed' ? 'green' : 'blue'}" style="margin-left:8px">${escapeHtml(board.status)}</span>
+      <span class="badge badge-${board.status === 'completed' ? 'green' : isRunning ? 'orange' : 'blue'}" style="margin-left:8px">${escapeHtml(board.status)}</span>
       <div style="margin-left:auto;display:flex;gap:8px">
-        <button class="btn btn-sm" onclick="renderBoards(document.getElementById('content'))">← Back</button>
+        <button class="btn btn-sm" onclick="stopBoardPolling();renderBoards(document.getElementById('content'))">← Back</button>
+        ${isRunning
+          ? `<button class="btn btn-sm" style="background:var(--orange);color:#000" onclick="pauseBoard(${board.id})">⏸ Pause</button>`
+          : hasUnfinished
+            ? `<button class="btn btn-sm btn-primary" onclick="runBoard(${board.id})">🚀 Run Project</button>`
+            : ''}
+        ${isComplete ? `<button class="btn btn-sm" style="background:var(--green);color:#000" onclick="buildProject(${board.id})">📦 Build Project</button>` : ''}
+        ${isComplete ? `<button class="btn btn-sm" onclick="viewProject(${board.id})">📂 View Files</button>` : ''}
         <button class="btn btn-sm btn-primary" onclick="addTaskPrompt(${board.id})">+ Task</button>
         <button class="btn btn-sm btn-danger" onclick="deleteBoard(${board.id})">🗑️</button>
       </div>
     </div>
+    ${isRunning ? `<div class="card" style="border-color:var(--cyan);background:rgba(0,255,255,0.05)"><b>⚡ Executing tasks automatically...</b> <span style="color:var(--text2)">${done.length}/${tasks.length} done</span></div>` : ''}
+    ${isComplete ? `<div class="card" style="border-color:var(--green);background:rgba(0,255,0,0.05)">
+      <b>✅ All ${done.length} tasks completed!</b>
+      <div style="margin-top:8px;display:flex;gap:8px">
+        <button class="btn btn-primary" onclick="buildProject(${board.id})">📦 Build Project — assemble all scripts into runnable files</button>
+        <button class="btn" onclick="viewProject(${board.id})">📂 View Files</button>
+      </div>
+    </div>` : ''}
     ${needsInput.length > 0 ? `<div class="card" style="border-color:var(--orange)"><b>⚠️ ${needsInput.length} tasks need your input</b></div>` : ''}
     <div class="kanban">
       <div class="kanban-col">
@@ -325,11 +1047,13 @@ async function viewBoard(boardId) {
 function taskCard(t, boardId) {
   const qaClass = t.qa_status === 'pass' ? 'pass' : t.qa_status === 'fail' ? 'fail' : 'pending';
   const needsQ = t.requires_input && !t.input_answer;
-  return `<div class="task-card" onclick="taskDetail(${t.id}, ${boardId})">
-    <div class="task-title">${needsQ ? '❓ ' : ''}${escapeHtml(t.title)}</div>
+  return `<div class="task-card">
+    <div class="task-title" onclick="taskDetail(${t.id}, ${boardId})" style="cursor:pointer">${needsQ ? '❓ ' : ''}${escapeHtml(t.title)}</div>
     <div class="task-meta">
+      ${t.status === 'pending' ? `<button class="btn btn-xs btn-primary" onclick="executeTask(${t.id},${boardId})" style="font-size:11px;padding:2px 6px">⚡ Execute</button>` : ''}
+      ${t.status === 'in_progress' ? `<span style="color:var(--cyan);font-size:12px">⏳ Running...</span>` : ''}
+      ${t.status === 'done' && t.execution_log ? `<button class="btn btn-xs" onclick="viewTaskLog(${t.id},${boardId})" style="font-size:11px;padding:2px 6px">📜 Result</button>` : ''}
       <span class="task-qa ${qaClass}">QA: ${escapeHtml(t.qa_status)}</span>
-      ${t.tools_needed ? `<span>🔧</span>` : ''}
     </div>
   </div>`;
 }
@@ -342,9 +1066,15 @@ async function taskDetail(taskId, boardId) {
   const statusOpts = ['pending', 'in_progress', 'done'].map(s =>
     `<button class="btn btn-sm ${task.status === s ? 'btn-primary' : ''}" onclick="setTaskStatus(${taskId},${boardId},'${s}')">${s}</button>`).join('');
 
+  const logPreview = task.execution_log
+    ? `<div class="form-group"><label class="form-label">📜 Execution Result</label><pre style="background:var(--bg2);padding:12px;border-radius:6px;max-height:300px;overflow:auto;font-size:12px;white-space:pre-wrap;border:1px solid var(--border)">${escapeHtml(task.execution_log.substring(0, 3000))}${task.execution_log.length > 3000 ? '\n...(truncated)' : ''}</pre></div>`
+    : '';
+
   showModal(`Task: ${escapeHtml(task.title)}`, `
     <p style="color:var(--text2);margin-bottom:12px">${escapeHtml(task.description || 'No description')}</p>
     <div class="form-group"><label class="form-label">Status</label><div class="btn-group">${statusOpts}</div></div>
+    ${task.status === 'pending' ? `<div class="form-group"><button class="btn btn-primary" onclick="executeTask(${taskId},${boardId});closeModal()">⚡ Execute \u2014 generate script for this task</button></div>` : ''}
+    ${logPreview}
     ${task.requires_input ? `<div class="form-group"><label class="form-label">❓ ${escapeHtml(task.input_question || 'Input needed')}</label>
       <input class="input" id="task-answer" value="${escapeAttr(task.input_answer || '')}" placeholder="Your answer...">
       <button class="btn btn-sm" style="margin-top:6px" onclick="answerTask(${taskId},${boardId})">Save Answer</button></div>` : ''}
@@ -357,7 +1087,118 @@ async function taskDetail(taskId, boardId) {
 async function setTaskStatus(taskId, boardId, status) { await PUT(`/tasks/${taskId}`, { status }); closeModal(); viewBoard(boardId); await refreshAll(); updateHeader(); }
 async function answerTask(taskId, boardId) { await PUT(`/tasks/${taskId}/answer`, { answer: document.getElementById('task-answer').value }); closeModal(); viewBoard(boardId); }
 async function runQA(taskId, boardId) { await POST(`/tasks/${taskId}/qa`); closeModal(); viewBoard(boardId); await refreshAll(); updateHeader(); }
-async function deleteBoard(boardId) { if (!confirm('Delete this board?')) return; await DEL(`/boards/${boardId}`); await refreshAll(); renderBoards(document.getElementById('content')); }
+async function deleteBoard(boardId) { if (!confirm('Delete this board?')) return; stopBoardPolling(); await DEL(`/boards/${boardId}`); await refreshAll(); renderBoards(document.getElementById('content')); }
+async function runBoard(boardId) { await POST(`/boards/${boardId}/execute`); viewBoard(boardId); }
+async function pauseBoard(boardId) { stopBoardPolling(); await POST(`/boards/${boardId}/pause`); viewBoard(boardId); }
+async function executeTask(taskId, boardId) { await POST(`/tasks/${taskId}/execute`); viewBoard(boardId); }
+function viewTaskLog(taskId, boardId) { taskDetail(taskId, boardId); }
+
+async function buildProject(boardId) {
+  const content = document.getElementById('content');
+  const buildBtn = content.querySelector('[onclick*="buildProject"]');
+  if (buildBtn) { buildBtn.disabled = true; buildBtn.textContent = '⏳ Building...'; }
+  showModal('📦 Building Project', `
+    <div class="empty-state">
+      <div class="empty-icon" style="animation:spin 2s linear infinite">⚙️</div>
+      <h3>Assembling project...</h3>
+      <p>The AI is combining all task outputs into proper files with correct imports, structure, and a main entry point.</p>
+      <p style="color:var(--text2);font-size:12px">This may take 30-60 seconds</p>
+    </div>
+  `);
+  try {
+    const result = await POST(`/boards/${boardId}/build`);
+    closeModal();
+    if (result.ok) {
+      showModal('📦 Project Built!', `
+        <div style="margin-bottom:12px">
+          <span class="badge badge-green">✅ ${result.files.length} files created</span>
+          <span style="color:var(--text2);margin-left:8px">via ${escapeHtml(result.provider || 'LLM')}</span>
+        </div>
+        <div style="background:var(--bg2);border-radius:6px;padding:12px;border:1px solid var(--border);max-height:300px;overflow:auto">
+          ${result.files.map(f => `<div style="padding:4px 0;font-family:monospace;font-size:13px;cursor:pointer;color:var(--cyan)" onclick="closeModal();viewProjectFile(${boardId},'${escapeAttr(f.path)}')">
+            📄 ${escapeHtml(f.path)} <span style="color:var(--text2);font-size:11px">(${f.size} bytes)</span>
+          </div>`).join('')}
+        </div>
+        <div style="margin-top:12px">
+          <p style="color:var(--text2);font-size:12px">📁 Saved to: <code>${escapeHtml(result.projectDir || '')}</code></p>
+        </div>
+        <div class="btn-group" style="margin-top:12px">
+          <button class="btn btn-primary" onclick="closeModal();viewProject(${boardId})">📂 Browse Files</button>
+          <button class="btn" onclick="closeModal()">Close</button>
+        </div>
+      `);
+    } else {
+      showModal('❌ Build Failed', `<p>${escapeHtml(result.error || 'Unknown error')}</p><button class="btn" onclick="closeModal()">Close</button>`);
+    }
+  } catch (err) {
+    closeModal();
+    showModal('❌ Build Error', `<p>${escapeHtml(err.message || 'Failed to build')}</p><button class="btn" onclick="closeModal()">Close</button>`);
+  }
+}
+
+async function viewProject(boardId) {
+  const content = document.getElementById('content');
+  const data = await GET(`/boards/${boardId}/project`);
+  const board = (await GET(`/boards/${boardId}`)).board;
+  const title = board ? escapeHtml(board.title) : 'Project';
+
+  if (!data.ok || !data.files || data.files.length === 0) {
+    showModal('📂 No Project Files', `
+      <p>${escapeHtml(data.message || 'No files found. Build the project first.')}</p>
+      <div class="btn-group" style="margin-top:12px">
+        <button class="btn btn-primary" onclick="closeModal();buildProject(${boardId})">📦 Build Now</button>
+        <button class="btn" onclick="closeModal()">Cancel</button>
+      </div>
+    `);
+    return;
+  }
+
+  content.innerHTML = `
+    <div class="section-title">
+      <span class="icon">📂</span> ${title} — Project Files
+      <div style="margin-left:auto;display:flex;gap:8px">
+        <button class="btn btn-sm" onclick="viewBoard(${boardId})">← Board</button>
+        <button class="btn btn-sm btn-primary" onclick="buildProject(${boardId})">🔄 Rebuild</button>
+      </div>
+    </div>
+    <div style="display:grid;grid-template-columns:250px 1fr;gap:16px;height:calc(100vh - 160px)">
+      <div class="card" style="overflow:auto;margin:0;padding:8px">
+        <div style="font-weight:bold;padding:8px;border-bottom:1px solid var(--border);margin-bottom:4px">📁 Files (${data.files.length})</div>
+        ${data.files.map(f => `
+          <div class="file-item" onclick="viewProjectFile(${boardId},'${escapeAttr(f.path)}')" style="padding:6px 8px;cursor:pointer;border-radius:4px;font-family:monospace;font-size:12px;transition:background 0.2s"
+               onmouseover="this.style.background='var(--bg3)'" onmouseout="this.style.background='transparent'">
+            ${f.path.endsWith('.js') ? '🟨' : f.path.endsWith('.py') ? '🐍' : f.path.endsWith('.md') ? '📝' : f.path.endsWith('.json') ? '📋' : '📄'} ${escapeHtml(f.path)}
+          </div>
+        `).join('')}
+      </div>
+      <div class="card" id="file-viewer" style="overflow:auto;margin:0;padding:16px">
+        <div class="empty-state"><div class="empty-icon">👈</div><h3>Select a file</h3><p>Click a file from the list to view its contents</p></div>
+      </div>
+    </div>
+  `;
+}
+
+async function viewProjectFile(boardId, filePath) {
+  const viewer = document.getElementById('file-viewer');
+  if (!viewer) { await viewProject(boardId); return; }
+  viewer.innerHTML = '<div style="text-align:center;padding:20px">⏳ Loading...</div>';
+  try {
+    const data = await GET(`/boards/${boardId}/project/file?path=${encodeURIComponent(filePath)}`);
+    if (data.ok) {
+      viewer.innerHTML = `
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;padding-bottom:8px;border-bottom:1px solid var(--border)">
+          <span style="font-family:monospace;font-weight:bold">${escapeHtml(filePath)}</span>
+          <span style="color:var(--text2);font-size:12px">${data.content.length} chars · ${data.content.split('\\n').length} lines</span>
+        </div>
+        <pre style="background:var(--bg1);padding:12px;border-radius:6px;overflow:auto;font-size:12px;line-height:1.5;white-space:pre-wrap;border:1px solid var(--border);max-height:calc(100vh - 250px)">${escapeHtml(data.content)}</pre>
+      `;
+    } else {
+      viewer.innerHTML = `<div class="empty-state"><div class="empty-icon">❌</div><h3>Error</h3><p>${escapeHtml(data.error || 'Failed to load')}</p></div>`;
+    }
+  } catch (err) {
+    viewer.innerHTML = `<div class="empty-state"><div class="empty-icon">❌</div><h3>Error</h3><p>${escapeHtml(err.message)}</p></div>`;
+  }
+}
 
 function addTaskPrompt(boardId) {
   showModal('Add Task', `

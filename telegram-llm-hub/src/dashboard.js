@@ -1,8 +1,9 @@
 import express from 'express';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
-import { readdir, readFile, stat, writeFile as fsWriteFile, mkdir as fsMkdir } from 'fs/promises';
-import { spawn } from 'child_process';
+import { readdir, readFile, stat, writeFile as fsWriteFile, mkdir as fsMkdir, access } from 'fs/promises';
+import { spawn, exec as execCb } from 'child_process';
+import { existsSync } from 'fs';
 import http from 'http';
 import db from './db.js';
 import { llm } from './llm-manager.js';
@@ -20,12 +21,16 @@ import { memory } from './memory.js';
 import { templates } from './templates.js';
 import { plugins } from './plugins.js';
 import featureRoutes, { setUserIdResolver } from './routes/features.js';
+import { projectManager } from './project-manager.js';
+import { autoFixLoop } from './auto-fix.js';
 import crypto from 'crypto';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // --- Exported project management ---
 const runningProjects = new Map(); // name -> { process, port, logs }
+const persistedLogs = new Map();   // "gen-<id>" -> string[] — logs survive after process stops
+const dashboardRunning = new Map(); // boardId -> true — tracks dashboard-initiated board executions
 let nextProjectPort = 10001;
 const freedPorts = []; // reclaim ports from stopped projects
 
@@ -81,7 +86,7 @@ export function createDashboard(port = 9999) {
     next();
   });
 
-  app.use(express.json());
+  app.use(express.json({ limit: '5mb' }));
   app.use(express.static(join(__dirname, 'public')));
 
   // Resolve userId: use query param or first known user, or default 1
@@ -189,7 +194,9 @@ export function createDashboard(port = 9999) {
   });
 
   app.delete('/api/boards/:id', (req, res) => {
-    boards.delete(parseInt(req.params.id));
+    const boardId = parseInt(req.params.id);
+    dashboardRunning.delete(boardId);
+    boards.deleteWithTasks(boardId);
     res.json({ ok: true });
   });
 
@@ -222,11 +229,1040 @@ export function createDashboard(port = 9999) {
     }
   });
 
+  // Run all pending tasks in a board sequentially (background)
   app.post('/api/boards/:id/execute', async (req, res) => {
     const userId = getUserId(req);
     const boardId = parseInt(req.params.id);
+
+    if (dashboardRunning.has(boardId)) {
+      return res.json({ status: 'already_running' });
+    }
+
     boards.updateStatus(boardId, 'executing');
-    res.json({ status: 'started' }); // Respond immediately, execution is async
+    dashboardRunning.set(boardId, true);
+    res.json({ status: 'started' });
+
+    // Background sequential execution
+    (async () => {
+      try {
+        llm.initDefaults(userId);
+        const allTasks = boards.getTasks(boardId);
+        const completedOutputs = [];
+
+        for (const t of allTasks) {
+          if (t.status === 'done' && t.execution_log) {
+            completedOutputs.push({ title: t.title, output: t.execution_log });
+          }
+        }
+
+        for (let i = 0; i < allTasks.length; i++) {
+          const task = allTasks[i];
+          if (task.status === 'done') continue;
+          if (!dashboardRunning.has(boardId)) break;
+
+          boards.setTaskStatus(task.id, 'in_progress');
+
+          try {
+            const isLastTask = !allTasks.slice(i + 1).some(t => t.status !== 'done');
+            let systemPrompt;
+
+            if (isLastTask && completedOutputs.length > 0) {
+              const prevSummary = completedOutputs.map((o, idx) =>
+                `--- Module ${idx + 1}: ${o.title} ---\n${o.output.substring(0, 2000)}`
+              ).join('\n\n');
+
+              systemPrompt = `You are executing the FINAL integration task of a project. Previous tasks produced these modules:\n\n${prevSummary}\n\nYour job: ${task.title}\nPlan: ${task.description || 'Integrate all modules into a working system.'}\n${task.input_answer ? `User Input: ${task.input_answer}` : ''}\n\nProduce a COMPLETE integration script that imports/uses all previous modules. Include imports, configuration, main entry point, and error handling. Make it production-ready.`;
+            } else {
+              const prevContext = completedOutputs.length > 0
+                ? `\n\nCompleted modules so far:\n${completedOutputs.map(o => `- ${o.title}`).join('\n')}`
+                : '';
+
+              systemPrompt = `You are executing a project task. Generate a COMPLETE, STANDALONE script or module.\n\nTask: ${task.title}\nExecution Plan: ${task.description || 'No plan \u2014 use your best judgment.'}\n${task.input_answer ? `User Input: ${task.input_answer}` : ''}\n${task.output_type && task.output_type !== 'text' ? `Expected output type: ${task.output_type}` : ''}${prevContext}\n\nRequirements:\n- Generate a complete, self-contained script/module\n- Include all necessary imports and exports\n- Add error handling\n- Make it production-ready`;
+            }
+
+            const result = await llm.chat(userId, [
+              { role: 'system', content: systemPrompt },
+              { role: 'user', content: `Execute: ${task.title}` }
+            ]);
+
+            boards.updateTask(task.id, { execution_log: result.text, status: 'done' });
+            completedOutputs.push({ title: task.title, output: result.text });
+          } catch (err) {
+            console.error(`Dashboard exec failed: ${task.title}`, err.message);
+            boards.setTaskStatus(task.id, 'pending');
+            dashboardRunning.delete(boardId);
+            boards.updateStatus(boardId, 'planning');
+            return;
+          }
+        }
+
+        const finalTasks = boards.getTasks(boardId);
+        boards.updateStatus(boardId, finalTasks.every(t => t.status === 'done') ? 'completed' : 'planning');
+      } finally {
+        dashboardRunning.delete(boardId);
+      }
+    })();
+  });
+
+  // Pause a running board
+  app.post('/api/boards/:id/pause', (req, res) => {
+    const boardId = parseInt(req.params.id);
+    dashboardRunning.delete(boardId);
+    boards.updateStatus(boardId, 'planning');
+    res.json({ ok: true });
+  });
+
+  // Execute a single task
+  app.post('/api/tasks/:id/execute', async (req, res) => {
+    const userId = getUserId(req);
+    const taskId = parseInt(req.params.id);
+    const task = boards.getTask(taskId);
+    if (!task) return res.status(404).json({ error: 'Not found' });
+
+    boards.setTaskStatus(taskId, 'in_progress');
+    res.json({ status: 'started' });
+
+    (async () => {
+      try {
+        llm.initDefaults(userId);
+        const allTasks = boards.getTasks(task.board_id);
+        const completedModules = allTasks
+          .filter(t => t.status === 'done' && t.execution_log && t.id !== taskId)
+          .map(t => `- ${t.title}`);
+        const contextNote = completedModules.length > 0
+          ? `\n\nCompleted modules so far:\n${completedModules.join('\n')}`
+          : '';
+
+        const result = await llm.chat(userId, [
+          {
+            role: 'system',
+            content: `You are executing a project task. Generate a COMPLETE, STANDALONE script or module.\n\nTask: ${task.title}\nExecution Plan: ${task.description || 'No plan \u2014 use your best judgment.'}\n${task.input_answer ? `User Input: ${task.input_answer}` : ''}\n${task.output_type && task.output_type !== 'text' ? `Expected output type: ${task.output_type}` : ''}${contextNote}\n\nRequirements:\n- Generate a complete, self-contained script/module\n- Include all necessary imports and exports\n- Add error handling\n- Make it production-ready`
+          },
+          { role: 'user', content: `Execute: ${task.title}` }
+        ]);
+
+        boards.updateTask(taskId, { execution_log: result.text, status: 'done' });
+        gamification.addXP(userId, 'task_completed');
+      } catch (err) {
+        console.error(`Dashboard task exec failed: ${task.title}`, err.message);
+        boards.setTaskStatus(taskId, 'pending');
+      }
+    })();
+  });
+
+  // ==================== BUILD / EXPORT PROJECT ====================
+
+  // Build project — LLM assembles all task outputs into proper file structure
+  app.post('/api/boards/:id/build', async (req, res) => {
+    const userId = getUserId(req);
+    const boardId = parseInt(req.params.id);
+    const board = boards.get(boardId);
+    if (!board) return res.status(404).json({ error: 'Board not found' });
+
+    const tasks = boards.getTasks(boardId);
+    const doneTasks = tasks.filter(t => t.status === 'done' && t.execution_log);
+    if (doneTasks.length === 0) return res.status(400).json({ error: 'No completed tasks to build from' });
+
+    // Create project directory
+    const slug = board.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/-+/g, '-').substring(0, 50);
+    const projectDir = join(__dirname, '..', 'projects', slug);
+    await fsMkdir(projectDir, { recursive: true });
+
+    try {
+      llm.initDefaults(userId);
+
+      // Summarize all task outputs for the LLM
+      const taskSummaries = doneTasks.map((t, i) => {
+        const content = t.execution_log.substring(0, 3000);
+        return `=== MODULE ${i + 1}: ${t.title} ===\n${content}\n=== END MODULE ${i + 1} ===`;
+      }).join('\n\n');
+
+      const result = await llm.chat(userId, [
+        {
+          role: 'system',
+          content: `You are a project assembler. You receive outputs from multiple project tasks and must combine them into a REAL, RUNNABLE project.
+
+You MUST output ONLY a series of files in this EXACT format — no other text before or after:
+
+===FILE: path/to/file.ext===
+actual file content here
+===ENDFILE===
+
+===FILE: another/file.ext===
+more content
+===ENDFILE===
+
+Rules:
+- Extract actual code from each module output (strip markdown formatting, explanations, backticks)
+- Create proper file names and directory structure (src/, config/, tests/, etc.)
+- Create a main entry point file (index.js, main.py, app.js, etc.)
+- Create package.json or requirements.txt with all dependencies
+- Create a README.md with setup instructions, what each file does, and how to run
+- Make sure imports/exports between files are correct and consistent
+- Use ONE consistent language/framework (prefer JavaScript/Node.js unless the modules are clearly Python)
+- The project must be runnable after "npm install && node index.js" or "pip install -r requirements.txt && python main.py"
+- Keep it practical — remove placeholder/dummy logic, make real connections between modules`
+        },
+        {
+          role: 'user',
+          content: `Assemble this project "${board.title}" from these ${doneTasks.length} completed modules:\n\n${taskSummaries}`
+        }
+      ]);
+
+      // Parse the ===FILE:...===ENDFILE=== blocks
+      const fileRegex = /===FILE:\s*(.+?)\s*===\n([\s\S]*?)===ENDFILE===/g;
+      const files = [];
+      let match;
+
+      while ((match = fileRegex.exec(result.text)) !== null) {
+        const filePath = match[1].trim().replace(/\\/g, '/');
+        const content = match[2].trimEnd() + '\n';
+
+        // Security: prevent path traversal
+        if (filePath.includes('..') || filePath.startsWith('/')) continue;
+
+        const fullPath = join(projectDir, ...filePath.split('/'));
+        const dir = dirname(fullPath);
+        await fsMkdir(dir, { recursive: true });
+        await fsWriteFile(fullPath, content, 'utf-8');
+
+        files.push({
+          path: filePath,
+          size: content.length,
+          lines: content.split('\n').length
+        });
+      }
+
+      // Fallback: if LLM didn't use the format, save raw outputs as individual files
+      if (files.length === 0) {
+        for (let i = 0; i < doneTasks.length; i++) {
+          const t = doneTasks[i];
+          const taskSlug = t.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').substring(0, 40);
+          const ext = detectExtension(t.execution_log);
+          const filename = `${String(i + 1).padStart(2, '0')}-${taskSlug}${ext}`;
+          await fsWriteFile(join(projectDir, filename), t.execution_log, 'utf-8');
+          files.push({ path: filename, size: t.execution_log.length, lines: t.execution_log.split('\n').length });
+        }
+        // Save a README
+        const readme = `# ${board.title}\n\nGenerated by Telegram LLM Hub\n\n## Modules\n\n${doneTasks.map((t, i) => `${i + 1}. **${t.title}**`).join('\n')}\n`;
+        await fsWriteFile(join(projectDir, 'README.md'), readme, 'utf-8');
+        files.unshift({ path: 'README.md', size: readme.length, lines: readme.split('\n').length });
+      }
+
+      res.json({ ok: true, projectDir, slug, files, provider: result.provider, model: result.model });
+    } catch (err) {
+      console.error('Build failed:', err.message);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Get project file tree and contents
+  app.get('/api/boards/:id/project', async (req, res) => {
+    const boardId = parseInt(req.params.id);
+    const board = boards.get(boardId);
+    if (!board) return res.status(404).json({ error: 'Board not found' });
+
+    const slug = board.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/-+/g, '-').substring(0, 50);
+    const projectDir = join(__dirname, '..', 'projects', slug);
+
+    try {
+      const files = await walkDir(projectDir, projectDir);
+      res.json({ ok: true, slug, projectDir, files });
+    } catch {
+      res.json({ ok: false, files: [], message: 'Project not built yet. Click "Build Project" to assemble.' });
+    }
+  });
+
+  // Read a specific project file
+  app.get('/api/boards/:id/project/file', async (req, res) => {
+    const boardId = parseInt(req.params.id);
+    const board = boards.get(boardId);
+    if (!board) return res.status(404).json({ error: 'Board not found' });
+
+    const filePath = req.query.path;
+    if (!filePath || filePath.includes('..')) return res.status(400).json({ error: 'Invalid path' });
+
+    const slug = board.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/-+/g, '-').substring(0, 50);
+    const fullPath = join(__dirname, '..', 'projects', slug, ...filePath.split('/'));
+
+    try {
+      const content = await readFile(fullPath, 'utf-8');
+      res.json({ ok: true, path: filePath, content });
+    } catch {
+      res.status(404).json({ error: 'File not found' });
+    }
+  });
+
+  // Helper: detect file extension from content
+  function detectExtension(content) {
+    if (!content) return '.md';
+    if (content.includes('```python') || content.match(/^(import |from .+ import |def |class )/m)) return '.py';
+    if (content.includes('```javascript') || content.includes('```js') || content.match(/^(const |let |var |function |import .+ from)/m)) return '.js';
+    if (content.includes('```typescript') || content.includes('```ts')) return '.ts';
+    if (content.includes('```json') || content.trim().startsWith('{')) return '.json';
+    if (content.includes('```yaml') || content.includes('```yml')) return '.yaml';
+    if (content.includes('```html')) return '.html';
+    if (content.includes('```css')) return '.css';
+    if (content.includes('```sql')) return '.sql';
+    return '.md';
+  }
+
+  // Helper: recursively list files in a directory
+  const SKIP_DIRS = new Set(['node_modules', '__pycache__', '.git', 'venv', '.venv', 'env', '.env', 'dist', 'build', '.next', '.cache', '.pytest_cache', 'egg-info']);
+  async function walkDir(dir, baseDir) {
+    const entries = await readdir(dir, { withFileTypes: true });
+    const files = [];
+    for (const entry of entries) {
+      if (SKIP_DIRS.has(entry.name)) continue;
+      const fullPath = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        const subFiles = await walkDir(fullPath, baseDir);
+        files.push(...subFiles);
+      } else {
+        const relPath = fullPath.replace(baseDir, '').replace(/\\/g, '/').replace(/^\//, '');
+        const s = await stat(fullPath);
+        files.push({ path: relPath, size: s.size, lines: 0 });
+      }
+    }
+    return files;
+  }
+
+  // ==================== AI PROJECTS ====================
+
+  // List projects
+  app.get('/api/gen', (req, res) => {
+    res.json(projectManager.listByUser(getUserId(req)));
+  });
+
+  // Create project from idea — LLM analyzes and suggests keypoints + tech
+  app.post('/api/gen', async (req, res) => {
+    const userId = getUserId(req);
+    const { idea } = req.body;
+    if (!idea) return res.status(400).json({ error: 'Provide an idea' });
+
+    llm.initDefaults(userId);
+    try {
+      const result = await llm.chat(userId, [
+        {
+          role: 'system',
+          content: `You are a project architect. The user describes a project idea. Analyze it and return a JSON object (no markdown fences):
+{
+  "title": "Short project name",
+  "description": "2-3 sentence project description",
+  "tech_stack": "nodejs" or "python",
+  "keypoints": ["feature 1", "feature 2", ...],
+  "run_command": "node index.js" or "py main.py",
+  "install_command": "npm install" or "py -m pip install -r requirements.txt"
+}
+
+Rules:
+- 5-10 keypoints covering all major features
+- Each keypoint = one concrete feature/component (e.g. "REST API with Express", "SQLite database with user/product tables")
+- Choose tech_stack based on what fits best (Node.js for web apps/APIs, Python for data/ML/scripts)
+- For Python: use "py" instead of "python", and "py -m pip" instead of "pip" (Windows compatible)
+- Only return the JSON, nothing else`
+        },
+        { role: 'user', content: idea }
+      ]);
+
+      let parsed;
+      try {
+        parsed = JSON.parse(result.text.replace(/```json?\n?/g, '').replace(/```/g, '').trim());
+      } catch {
+        parsed = { title: idea.substring(0, 50), description: idea, tech_stack: 'nodejs', keypoints: [idea], run_command: 'node index.js', install_command: 'npm install' };
+      }
+
+      const project = projectManager.create(
+        userId, parsed.title, parsed.description,
+        parsed.tech_stack, parsed.keypoints,
+        parsed.run_command, parsed.install_command
+      );
+
+      res.json({ project, provider: result.provider });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Get project detail
+  app.get('/api/gen/:id', (req, res) => {
+    const proj = projectManager.get(parseInt(req.params.id));
+    if (!proj) return res.status(404).json({ error: 'Not found' });
+    res.json(proj);
+  });
+
+  // Update keypoints
+  app.put('/api/gen/:id/keypoints', (req, res) => {
+    projectManager.update(parseInt(req.params.id), { keypoints: req.body.keypoints });
+    res.json({ ok: true });
+  });
+
+  // Chat about project — refine with LLM
+  app.post('/api/gen/:id/chat', async (req, res) => {
+    const userId = getUserId(req);
+    const id = parseInt(req.params.id);
+    const proj = projectManager.get(id);
+    if (!proj) return res.status(404).json({ error: 'Not found' });
+
+    const { message } = req.body;
+    projectManager.addChat(id, 'user', message);
+
+    llm.initDefaults(userId);
+    try {
+      const context = [
+        {
+          role: 'system',
+          content: `You are helping refine a ${proj.tech_stack} project called "${proj.title}".
+Description: ${proj.description}
+Current keypoints:\n${proj.keypoints.map((k, i) => `${i + 1}. ${k}`).join('\n')}
+
+Help the user refine this project. You can suggest adding/removing/modifying keypoints, changing tech stack, or answer questions about implementation.
+If you suggest keypoint changes, be specific about what to add/remove.`
+        },
+        // Include recent chat for context
+        ...proj.chat_history.slice(-10).map(m => ({ role: m.role, content: m.content })),
+        { role: 'user', content: message }
+      ];
+
+      const result = await llm.chat(userId, context);
+      projectManager.addChat(id, 'assistant', result.text);
+      res.json({ reply: result.text, provider: result.provider });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Clear chat history for a project
+  app.post('/api/gen/:id/clear-chat', (req, res) => {
+    const id = parseInt(req.params.id);
+    const proj = projectManager.get(id);
+    if (!proj) return res.status(404).json({ error: 'Not found' });
+    projectManager.update(id, { chat_history: [] });
+    res.json({ ok: true });
+  });
+
+  // Code-aware chat: sends message with all project files as context, can apply fixes
+  app.post('/api/gen/:id/code-chat', async (req, res) => {
+    const userId = getUserId(req);
+    const id = parseInt(req.params.id);
+    console.log(`[code-chat] Request for project ${id}, userId=${userId}`);
+    const proj = projectManager.get(id);
+    if (!proj) return res.status(404).json({ error: 'Not found' });
+
+    const { message } = req.body;
+    if (!message?.trim()) return res.status(400).json({ error: 'No message' });
+
+    console.log(`[code-chat] Project: "${proj.title}", path: ${proj.project_path}, msg length: ${message.length}`);
+    projectManager.addChat(id, 'user', message);
+    llm.initDefaults(userId);
+    const providers = llm.getEnabledProviders(userId);
+    console.log(`[code-chat] Enabled providers: ${providers.map(p => `${p.display_name} (${p.name})`).join(', ')}`);
+
+    try {
+      // Collect all project files for context
+      let fileContext = '';
+      if (proj.project_path) {
+        try {
+          const files = await walkDir(proj.project_path, proj.project_path);
+          console.log(`[code-chat] Found ${files.length} files in ${proj.project_path}`);
+          for (const f of files) {
+            // Skip large/binary files
+            if (f.size > 50000) continue;
+            const ext = f.path.split('.').pop()?.toLowerCase() || '';
+            if (['png','jpg','jpeg','gif','ico','woff','woff2','ttf','eot','zip','tar','gz','exe','dll','so','pyc','class'].includes(ext)) continue;
+            try {
+              const content = await readFile(join(proj.project_path, ...f.path.split('/')), 'utf-8');
+              const truncated = content.length > 4000 ? content.substring(0, 4000) + '\n...TRUNCATED...' : content;
+              fileContext += `--- ${f.path} ---\n${truncated}\n\n`;
+            } catch {}
+          }
+          console.log(`[code-chat] File context length: ${fileContext.length} chars`);
+        } catch (e) {
+          console.log(`[code-chat] walkDir error: ${e.message}`);
+        }
+      }
+
+      const isPython = proj.tech_stack === 'python';
+      const runCmd = proj.run_command || (isPython ? 'py main.py' : 'node index.js');
+      const entryFile = runCmd.split(' ').pop();
+
+      // Filter out poisoned history where LLM previously refused
+      const cleanHistory = proj.chat_history.slice(-10)
+        .filter(m => !(m.role === 'assistant' && /cannot (access|edit|modify|directly)|can't (access|edit|modify|directly)|don't have (access|direct)|do not have access|Manual Steps Required|manual|I'm unable to/i.test(m.content)))
+        .map(m => ({ role: m.role, content: m.content }));
+
+      const context = [
+        {
+          role: 'system',
+          content: `You are a ${isPython ? 'Python' : 'Node.js'} code generator. You write complete, working source code.
+
+SOURCE CODE OF THE PROJECT "${proj.title}":
+
+${fileContext || '(empty project)'}
+
+---
+Run command: ${runCmd}
+${isPython ? 'Use "py" not "python", "py -m pip" not "pip" for any shell commands.' : 'Use ESM imports.'}
+
+RESPONSE FORMAT:
+When providing code changes, wrap each complete source code in this markup (an automated script reads your output):
+
+===FILE: relative/path===
+entire source code
+===ENDFILE===
+
+Example response:
+The issue is a missing import. Here is the corrected code:
+
+===FILE: main.py===
+import sys
+import os
+
+def main():
+    print("fixed")
+
+if __name__ == "__main__":
+    main()
+===ENDFILE===
+
+IMPORTANT:
+- Always include the ENTIRE source code of each changed module, not snippets
+- Only include modules that need changes
+- The code blocks above are written to disk automatically by the system
+- For questions that don't need code changes, just answer normally`
+        },
+        ...cleanHistory,
+        { role: 'user', content: message }
+      ];
+
+      console.log(`[code-chat] Calling LLM for user ${userId}, context messages: ${context.length}, system prompt length: ${context[0]?.content?.length || 0}`);
+      const result = await llm.chat(userId, context, { max_tokens: 16384 });
+      console.log(`[code-chat] LLM responded via ${result.provider} (${result.model}), ${result.text?.length || 0} chars`);
+
+      // Parse file fixes from response — supports multiple formats:
+      // 1. ===FILE: path===...===ENDFILE=== (primary — same as generation/auto-fix)
+      // 2. ```filename.ext\n...code...\n```  (fallback — models sometimes use this)
+      const fixedFiles = [];
+      let match;
+
+      // Format 1: ===FILE: path===...===ENDFILE=== (primary)
+      const fileRegex = /===FILE:\s*(.+?)\s*===\n([\s\S]*?)===ENDFILE===/g;
+      while ((match = fileRegex.exec(result.text)) !== null) {
+        let filePath = match[1].trim().replace(/\\/g, '/');
+        const content = match[2].trimEnd() + '\n';
+        if (filePath.includes('..') || filePath.startsWith('/')) continue;
+        fixedFiles.push({ path: filePath, content });
+      }
+
+      // Format 2: ```filename.ext code fences (fallback)
+      if (fixedFiles.length === 0) {
+        const fenceRegex = /```([a-zA-Z0-9_\-./]+\.(?:py|js|ts|json|txt|html|css|yml|yaml|toml|cfg|ini|md|sh|bat|env|jsx|tsx))\n([\s\S]*?)```/g;
+        while ((match = fenceRegex.exec(result.text)) !== null) {
+          let filePath = match[1].trim().replace(/\\/g, '/');
+          const content = match[2].trimEnd() + '\n';
+          if (filePath.includes('..') || filePath.startsWith('/')) continue;
+          fixedFiles.push({ path: filePath, content });
+        }
+      }
+
+      console.log(`[code-chat] Parsed ${fixedFiles.length} file fix(es): ${fixedFiles.map(f => f.path).join(', ') || 'none'}`);
+
+      // Apply fixes if any
+      if (fixedFiles.length > 0 && proj.project_path) {
+        for (const f of fixedFiles) {
+          const fullPath = join(proj.project_path, ...f.path.split('/'));
+          await fsMkdir(dirname(fullPath), { recursive: true });
+          await fsWriteFile(fullPath, f.content, 'utf-8');
+        }
+      }
+
+      // Clean response text: remove file blocks for display, keep explanation
+      let displayText = result.text;
+      if (fixedFiles.length > 0) {
+        // Remove both formats from display
+        displayText = displayText
+          .replace(/```[a-zA-Z0-9_\-./]+\.(?:py|js|ts|json|txt|html|css|yml|yaml|toml|cfg|ini|md|sh|bat|env|jsx|tsx)\n[\s\S]*?```/g, '')
+          .replace(/===FILE:\s*.+?\s*===\n[\s\S]*?===ENDFILE===/g, '')
+          .trim();
+        if (!displayText) {
+          displayText = `✅ Fixed ${fixedFiles.length} file(s): ${fixedFiles.map(f => f.path).join(', ')}`;
+        } else {
+          displayText += `\n\n✅ Applied fixes to ${fixedFiles.length} file(s): ${fixedFiles.map(f => f.path).join(', ')}`;
+        }
+      }
+
+      projectManager.addChat(id, 'assistant', displayText);
+      res.json({
+        reply: displayText,
+        provider: result.provider,
+        filesFixed: fixedFiles.map(f => f.path),
+      });
+    } catch (err) {
+      console.error(`[code-chat] ERROR: ${err.message}`);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Generate project — LLM creates all files in one shot
+  app.post('/api/gen/:id/generate', async (req, res) => {
+    const userId = getUserId(req);
+    const id = parseInt(req.params.id);
+    const proj = projectManager.get(id);
+    if (!proj) return res.status(404).json({ error: 'Not found' });
+
+    projectManager.update(id, { status: 'generating' });
+
+    const slug = proj.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/-+/g, '-').substring(0, 50);
+    const projectDir = join(__dirname, '..', 'projects', slug);
+
+    try {
+      llm.initDefaults(userId);
+      await fsMkdir(projectDir, { recursive: true });
+
+      // Determine entry point file from run command
+      const isPython = proj.tech_stack === 'python';
+      const runCmd = proj.run_command || (isPython ? 'py main.py' : 'node index.js');
+      const entryFile = runCmd.split(' ').pop(); // e.g. "main.py" or "index.js"
+
+      const result = await llm.chat(userId, [
+        {
+          role: 'system',
+          content: `You are a senior software engineer. Create a COMPLETE, RUNNABLE ${isPython ? 'Python' : 'Node.js'} project.
+
+Project: ${proj.title}
+Description: ${proj.description}
+Tech Stack: ${isPython ? 'Python 3' : 'Node.js (ESM)'}
+
+Key Features:
+${proj.keypoints.map((k, i) => `${i + 1}. ${k}`).join('\n')}
+
+Output ALL project files in this EXACT format (no other text):
+
+===FILE: path/to/file.ext===
+complete file content here
+===ENDFILE===
+
+CRITICAL RULES:
+- THE VERY FIRST FILE MUST BE "${entryFile}" — this is the main entry point, the program starts here
+- ${isPython ? 'THE SECOND FILE MUST BE "requirements.txt" — list ALL third-party pip packages used (one per line, no version pins unless critical). If the project uses no external packages, still create an empty requirements.txt.' : 'THE SECOND FILE MUST BE "package.json" with "type":"module" and all dependencies listed.'}
+- All files must be in the project root or simple subdirectories (e.g. "utils/helper.py", NOT "ProjectName/main.py")
+- EVERY file needed to run the project — no placeholders, no TODOs, no "implement this later"
+- README.md with setup + run instructions
+- Run command: ${runCmd}
+- Install command: ${isPython ? 'py -m pip install -r requirements.txt' : 'npm install'}
+- All imports must match the actual file paths you create
+- Production-quality code with error handling and comments
+- All ${proj.keypoints.length} features from the keypoints must be fully implemented
+- Do NOT nest files inside a project-named subdirectory — all paths are relative to project root
+- ${isPython ? 'Use "py" not "python" and "py -m pip" not "pip" in any commands or documentation' : 'Use ESM imports (import/export), not CommonJS (require/module.exports)'}`
+        },
+        { role: 'user', content: `Generate the complete ${proj.title} project. Start with ${entryFile} as the first file.` }
+      ]);
+
+      // Clean old files before writing new ones (on regenerate)
+      try {
+        const oldFiles = await walkDir(projectDir, projectDir);
+        for (const f of oldFiles) {
+          try { await import('fs/promises').then(fs => fs.unlink(join(projectDir, ...f.split('/')))); } catch {}
+        }
+      } catch {}
+
+      // Parse ===FILE:...===ENDFILE=== blocks
+      const fileRegex = /===FILE:\s*(.+?)\s*===\n([\s\S]*?)===ENDFILE===/g;
+      const files = [];
+      let match;
+      while ((match = fileRegex.exec(result.text)) !== null) {
+        let filePath = match[1].trim().replace(/\\/g, '/');
+        const content = match[2].trimEnd() + '\n';
+        if (filePath.includes('..') || filePath.startsWith('/')) continue;
+
+        // Strip project-name prefix if the LLM nested files (e.g. "ProjectName/main.py" → "main.py")
+        const slugPrefix = slug + '/';
+        if (filePath.toLowerCase().startsWith(slugPrefix)) filePath = filePath.substring(slugPrefix.length);
+        const nameParts = proj.title.toLowerCase().replace(/[^a-z0-9]+/g, '_');
+        if (filePath.startsWith(nameParts + '/')) filePath = filePath.substring(nameParts.length + 1);
+
+        const fullPath = join(projectDir, ...filePath.split('/'));
+        await fsMkdir(dirname(fullPath), { recursive: true });
+        await fsWriteFile(fullPath, content, 'utf-8');
+        files.push({ path: filePath, size: content.length });
+      }
+
+      if (files.length === 0) {
+        await fsWriteFile(join(projectDir, 'output.md'), result.text, 'utf-8');
+        files.push({ path: 'output.md', size: result.text.length });
+      }
+
+      // Validate: does the entry point file exist?
+      const entryExists = files.some(f => f.path === entryFile || f.path.endsWith('/' + entryFile));
+      let warnings = [];
+      if (!entryExists) {
+        warnings.push(`⚠️ Entry point "${entryFile}" was not generated — project may not run correctly`);
+      }
+
+      projectManager.update(id, { status: 'ready', project_path: projectDir });
+
+      // Auto-fix: try running the project, if it crashes send error to LLM for repair
+      let fixResult = null;
+      if (entryExists) {
+        try {
+          fixResult = await autoFixLoop(llm, userId, proj, projectDir, files, {
+            onProgress: (msg) => { /* dashboard doesn't stream progress yet */ },
+          });
+          if (fixResult.warnings.length > 0) warnings.push(...fixResult.warnings);
+          if (fixResult.fixes.length > 0) {
+            warnings.unshift(`🔧 Auto-fixed ${fixResult.fixes.length} issue(s) after generation`);
+          }
+        } catch (fixErr) {
+          warnings.push(`⚠️ Auto-fix skipped: ${fixErr.message}`);
+        }
+      }
+
+      res.json({ ok: true, files, projectDir, slug, provider: result.provider, warnings, fixes: fixResult?.fixes || [] });
+    } catch (err) {
+      projectManager.update(id, { status: 'draft' });
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Auto-fix a generated project — tries to run, sends crash to LLM for repair
+  app.post('/api/gen/:id/fix', async (req, res) => {
+    const userId = getUserId(req);
+    const id = parseInt(req.params.id);
+    const proj = projectManager.get(id);
+    if (!proj?.project_path) return res.status(400).json({ error: 'Project not generated yet' });
+
+    try {
+      llm.initDefaults(userId);
+      const isPython = proj.tech_stack === 'python';
+      const runCmd = proj.run_command || (isPython ? 'py main.py' : 'node index.js');
+      const existingFiles = await walkDir(proj.project_path, proj.project_path);
+      const files = existingFiles.map(f => ({ path: f, size: 0 }));
+
+      const fixResult = await autoFixLoop(llm, userId, proj, proj.project_path, files, {
+        onProgress: () => {},
+      });
+
+      res.json({
+        ok: fixResult.ok,
+        fixes: fixResult.fixes,
+        warnings: fixResult.warnings,
+        filesFixed: fixResult.fixes.flatMap(f => f.filesFixed),
+        lastError: fixResult.lastError || null,
+      });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // List generated files
+  app.get('/api/gen/:id/files', async (req, res) => {
+    const proj = projectManager.get(parseInt(req.params.id));
+    if (!proj) return res.status(404).json({ error: 'Not found' });
+    if (!proj.project_path) return res.json({ ok: false, files: [], message: 'Not generated yet' });
+    try {
+      const files = await walkDir(proj.project_path, proj.project_path);
+      res.json({ ok: true, files, projectDir: proj.project_path });
+    } catch {
+      res.json({ ok: false, files: [], message: 'Project files not found' });
+    }
+  });
+
+  // Read a specific file
+  app.get('/api/gen/:id/file', async (req, res) => {
+    const proj = projectManager.get(parseInt(req.params.id));
+    if (!proj?.project_path) return res.status(404).json({ error: 'Not found' });
+    const fp = req.query.path;
+    if (!fp || fp.includes('..')) return res.status(400).json({ error: 'Invalid path' });
+    try {
+      const content = await readFile(join(proj.project_path, ...fp.split('/')), 'utf-8');
+      res.json({ ok: true, path: fp, content });
+    } catch { res.status(404).json({ error: 'File not found' }); }
+  });
+
+  // Run the generated project
+  // Windows-safe command fixer: pip → py -m pip, python → py on Windows
+  const isWindows = process.platform === 'win32';
+  function fixPythonCmd(cmd) {
+    if (!isWindows) return cmd;
+    return cmd
+      .replace(/^pip3?\b/, 'py -m pip')
+      .replace(/^python3?\b/, 'py');
+  }
+
+  // Known Python stdlib modules (won't be in requirements.txt)
+  const PY_STDLIB = new Set([
+    'os', 'sys', 'json', 'time', 'datetime', 'math', 'random', 're', 'io',
+    'pathlib', 'typing', 'collections', 'itertools', 'functools', 'operator',
+    'string', 'textwrap', 'struct', 'copy', 'enum', 'abc', 'contextlib',
+    'dataclasses', 'threading', 'multiprocessing', 'subprocess', 'shutil',
+    'tempfile', 'glob', 'fnmatch', 'stat', 'logging', 'warnings', 'traceback',
+    'unittest', 'doctest', 'pdb', 'argparse', 'configparser', 'csv', 'sqlite3',
+    'hashlib', 'hmac', 'secrets', 'base64', 'uuid', 'socket', 'http',
+    'urllib', 'email', 'html', 'xml', 'webbrowser', 'pprint', 'pickle',
+    'shelve', 'marshal', 'ast', 'dis', 'inspect', 'importlib', 'pkgutil',
+    'zipfile', 'tarfile', 'gzip', 'bz2', 'lzma', 'zlib', 'signal',
+    'asyncio', 'concurrent', 'queue', 'sched', 'select', 'selectors',
+    'platform', 'ctypes', 'types', 'weakref', 'gc', 'resource',
+    '__future__', 'builtins', 'array', 'decimal', 'fractions', 'statistics',
+  ]);
+
+  // Common import-name → pip-package mappings
+  const PY_IMPORT_MAP = {
+    'flask': 'flask', 'fastapi': 'fastapi', 'uvicorn': 'uvicorn',
+    'requests': 'requests', 'httpx': 'httpx', 'aiohttp': 'aiohttp',
+    'pydantic': 'pydantic', 'dotenv': 'python-dotenv',
+    'PIL': 'Pillow', 'cv2': 'opencv-python', 'sklearn': 'scikit-learn',
+    'bs4': 'beautifulsoup4', 'yaml': 'pyyaml', 'toml': 'toml',
+    'pandas': 'pandas', 'numpy': 'numpy', 'matplotlib': 'matplotlib',
+    'scipy': 'scipy', 'torch': 'torch', 'transformers': 'transformers',
+    'openai': 'openai', 'anthropic': 'anthropic', 'gradio': 'gradio',
+    'streamlit': 'streamlit', 'rich': 'rich', 'click': 'click',
+    'typer': 'typer', 'colorama': 'colorama', 'tqdm': 'tqdm',
+    'jinja2': 'Jinja2', 'sqlalchemy': 'SQLAlchemy', 'redis': 'redis',
+    'celery': 'celery', 'pymongo': 'pymongo', 'psycopg2': 'psycopg2-binary',
+    'websockets': 'websockets', 'starlette': 'starlette', 'pytest': 'pytest',
+  };
+
+  // Scan .py files for imports and build a requirements.txt
+  async function autoDetectPythonDeps(projectDir) {
+    const deps = new Set();
+    const pyFiles = [];
+
+    // Collect all .py files
+    async function scan(dir) {
+      try {
+        const entries = await readdir(dir, { withFileTypes: true });
+        for (const e of entries) {
+          const full = join(dir, e.name);
+          if (e.isDirectory() && !e.name.startsWith('.') && e.name !== '__pycache__' && e.name !== 'node_modules') {
+            await scan(full);
+          } else if (e.isFile() && e.name.endsWith('.py')) {
+            pyFiles.push(full);
+          }
+        }
+      } catch {}
+    }
+    await scan(projectDir);
+
+    for (const fp of pyFiles) {
+      try {
+        const code = await readFile(fp, 'utf-8');
+        // Match: import foo / import foo.bar / from foo import bar / from foo.bar import baz
+        const importRe = /^(?:import|from)\s+([a-zA-Z_][a-zA-Z0-9_]*)/gm;
+        let m;
+        while ((m = importRe.exec(code)) !== null) {
+          const mod = m[1];
+          if (!PY_STDLIB.has(mod)) {
+            const pkg = PY_IMPORT_MAP[mod] || mod;
+            deps.add(pkg);
+          }
+        }
+      } catch {}
+    }
+    return [...deps].sort();
+  }
+
+  app.post('/api/gen/:id/run', (req, res) => {
+    const proj = projectManager.get(parseInt(req.params.id));
+    if (!proj?.project_path) return res.status(400).json({ error: 'Project not generated yet' });
+
+    const name = `gen-${proj.id}`;
+    if (runningProjects.has(name)) {
+      return res.json({ status: 'already_running', port: runningProjects.get(name).port });
+    }
+
+    // Respond immediately — install + run happens in background so UI doesn't freeze
+    const port = freedPorts.pop() || nextProjectPort++;
+    // Persist logs across runs — add separator if previous logs exist
+    if (!persistedLogs.has(name)) persistedLogs.set(name, []);
+    const allLogs = persistedLogs.get(name);
+    if (allLogs.length > 0) {
+      allLogs.push(`\n${'━'.repeat(50)}\n`);
+      allLogs.push(`▶️  New run — ${new Date().toLocaleTimeString()}\n`);
+      allLogs.push(`${'━'.repeat(50)}\n\n`);
+    }
+    allLogs.push('📦 Installing dependencies...\n');
+    // Cap persisted logs so they don't grow unbounded
+    if (allLogs.length > 500) allLogs.splice(0, allLogs.length - 300);
+    const logs = allLogs;
+    runningProjects.set(name, { process: null, port, logs, projectDir: proj.project_path, phase: 'installing' });
+    projectManager.update(proj.id, { status: 'running' });
+    res.json({ status: 'installing', port, name });
+
+    // Background: install deps then start project
+    (async () => {
+      let installCmd = proj.install_command || (proj.tech_stack === 'python' ? 'py -m pip install -r requirements.txt' : 'npm install');
+      installCmd = fixPythonCmd(installCmd);
+
+      // Check if dependency file actually exists before running install
+      const isPython = proj.tech_stack === 'python';
+      const depFile = isPython ? 'requirements.txt' : 'package.json';
+      const depFilePath = join(proj.project_path, depFile);
+      let hasDeps = existsSync(depFilePath);
+
+      // Auto-generate requirements.txt from Python imports if missing
+      if (!hasDeps && isPython) {
+        try {
+          const reqs = await autoDetectPythonDeps(proj.project_path);
+          if (reqs.length > 0) {
+            await fsWriteFile(depFilePath, reqs.join('\n') + '\n', 'utf-8');
+            logs.push(`📋 Auto-generated requirements.txt (${reqs.length} deps detected)\n`);
+            hasDeps = true;
+          } else {
+            logs.push('ℹ️ No external dependencies detected — skipping install\n');
+          }
+        } catch {
+          logs.push('ℹ️ No requirements.txt found — skipping install\n');
+        }
+      } else if (!hasDeps) {
+        logs.push(`ℹ️ No ${depFile} found — skipping install\n`);
+      }
+
+      if (hasDeps) {
+        try {
+          logs.push(`> ${installCmd}\n`);
+          await new Promise((resolve, reject) => {
+            const proc = spawn(installCmd, { cwd: proj.project_path, shell: true });
+            proc.stdout?.on('data', d => { logs.push(d.toString()); if (logs.length > 300) logs.shift(); });
+            proc.stderr?.on('data', d => { logs.push(d.toString()); if (logs.length > 300) logs.shift(); });
+            proc.on('close', code => code === 0 ? resolve() : reject(new Error(`Install exited with code ${code}`)));
+            setTimeout(() => { try { proc.kill(); } catch {} reject(new Error('Install timed out (2 min)')); }, 120000);
+          });
+          logs.push('\n✅ Dependencies installed\n\n');
+        } catch (err) {
+          logs.push(`\n⚠️ Install had issues: ${err.message}\n`);
+          logs.push('⏩ Attempting to run anyway...\n\n');
+          // Don't bail out — try running the project even if install partially failed
+        }
+      }
+
+      // Start the project
+      let runCmd = proj.run_command || (proj.tech_stack === 'python' ? 'py main.py' : 'node index.js');
+      runCmd = fixPythonCmd(runCmd);
+      logs.push(`🚀 Starting: ${runCmd}\n`);
+
+      try {
+        const proc = spawn(runCmd, { cwd: proj.project_path, shell: true, env: { ...process.env, PORT: String(port) } });
+        proc.stdout?.on('data', d => { logs.push(d.toString()); if (logs.length > 300) logs.shift(); });
+        proc.stderr?.on('data', d => { logs.push(`[ERR] ${d}`); if (logs.length > 300) logs.shift(); });
+        proc.on('close', (code) => {
+          logs.push(`\n⏹ Process exited (code ${code})\n`);
+          // Snapshot logs into persistedLogs so they survive runningProjects cleanup
+          persistedLogs.set(name, [...logs]);
+          // Keep entry for a bit so user can read logs, then clean up
+          const entry = runningProjects.get(name);
+          if (entry) entry.phase = 'stopped';
+          setTimeout(() => {
+            runningProjects.delete(name);
+            freedPorts.push(port);
+            projectManager.update(proj.id, { status: 'ready' });
+          }, 5000);
+        });
+
+        const entry = runningProjects.get(name);
+        if (entry) { entry.process = proc; entry.phase = 'running'; }
+      } catch (err) {
+        logs.push(`\n❌ Failed to start: ${err.message}\n`);
+        persistedLogs.set(name, [...logs]);
+        runningProjects.delete(name);
+        freedPorts.push(port);
+        projectManager.update(proj.id, { status: 'ready' });
+      }
+    })();
+  });
+
+  // Stop a running project
+  app.post('/api/gen/:id/stop', (req, res) => {
+    const proj = projectManager.get(parseInt(req.params.id));
+    if (!proj) return res.status(404).json({ error: 'Not found' });
+    const name = `gen-${proj.id}`;
+    const running = runningProjects.get(name);
+    if (running) {
+      // Snapshot logs before cleanup
+      if (running.logs?.length) {
+        running.logs.push('\n⏹ Stopped by user\n');
+        persistedLogs.set(name, [...running.logs]);
+      }
+      try { if (running.process) running.process.kill(); } catch {}
+      runningProjects.delete(name);
+      freedPorts.push(running.port);
+    }
+    projectManager.update(proj.id, { status: 'ready' });
+    res.json({ ok: true });
+  });
+
+  // Get project run logs
+  app.get('/api/gen/:id/logs', (req, res) => {
+    const proj = projectManager.get(parseInt(req.params.id));
+    if (!proj) return res.status(404).json({ error: 'Not found' });
+    const name = `gen-${proj.id}`;
+    const running = runningProjects.get(name);
+    const saved = persistedLogs.get(name);
+    res.json({
+      running: !!running,
+      port: running?.port,
+      logs: running?.logs?.join('') || saved?.join('') || ''
+    });
+  });
+
+  // Clear persisted logs
+  app.post('/api/gen/:id/clear-logs', (req, res) => {
+    const proj = projectManager.get(parseInt(req.params.id));
+    if (!proj) return res.status(404).json({ error: 'Not found' });
+    persistedLogs.delete(`gen-${proj.id}`);
+    res.json({ ok: true });
+  });
+
+  // Open terminal in project directory and run the project command
+  app.post('/api/gen/:id/open-terminal', (req, res) => {
+    const proj = projectManager.get(parseInt(req.params.id));
+    if (!proj?.project_path) return res.status(400).json({ error: 'Project not generated yet' });
+    const runCmd = proj.run_command || (proj.tech_stack === 'python' ? 'py main.py' : 'node index.js');
+    try {
+      if (isWindows) {
+        // start opens a new window, /k keeps it open after command finishes
+        const safeTitle = proj.title.replace(/[&|<>^"]/g, '');
+        execCb(`start "${safeTitle}" cmd.exe /k "cd /d ${proj.project_path} && ${runCmd}"`,
+          { cwd: proj.project_path, windowsHide: false },
+          (err) => { if (err) console.log('[open-terminal] error:', err.message); });
+      } else if (process.platform === 'darwin') {
+        execCb(`open -a Terminal "${proj.project_path}"`);
+      } else {
+        execCb(`x-terminal-emulator -e "cd '${proj.project_path}' && bash"`, { cwd: proj.project_path });
+      }
+      res.json({ ok: true });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Open project folder in file explorer
+  app.post('/api/gen/:id/open-folder', (req, res) => {
+    const proj = projectManager.get(parseInt(req.params.id));
+    if (!proj?.project_path) return res.status(400).json({ error: 'Project not generated yet' });
+    try {
+      const openCmd = isWindows ? 'explorer' : process.platform === 'darwin' ? 'open' : 'xdg-open';
+      spawn(openCmd, [proj.project_path], { detached: true, shell: true }).unref();
+      res.json({ ok: true, path: proj.project_path });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Delete project
+  app.delete('/api/gen/:id', (req, res) => {
+    const id = parseInt(req.params.id);
+    const proj = projectManager.get(id);
+    if (proj) {
+      const name = `gen-${id}`;
+      if (runningProjects.has(name)) {
+        try { runningProjects.get(name).process.kill(); } catch {}
+        runningProjects.delete(name);
+      }
+    }
+    projectManager.delete(id);
+    res.json({ ok: true });
   });
 
   // ==================== WORKFLOWS ====================

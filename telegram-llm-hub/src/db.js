@@ -323,6 +323,23 @@ db.exec(`
     config TEXT DEFAULT '{}',
     loaded_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
+
+  -- AI-Generated Projects
+  CREATE TABLE IF NOT EXISTS gen_projects (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    title TEXT NOT NULL,
+    description TEXT DEFAULT '',
+    tech_stack TEXT DEFAULT 'nodejs',
+    keypoints TEXT DEFAULT '[]',
+    chat_history TEXT DEFAULT '[]',
+    status TEXT DEFAULT 'draft',
+    project_path TEXT DEFAULT '',
+    run_command TEXT DEFAULT '',
+    install_command TEXT DEFAULT '',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+  CREATE INDEX IF NOT EXISTS idx_genproj_user ON gen_projects(user_id);
 `);
 
 export default db;

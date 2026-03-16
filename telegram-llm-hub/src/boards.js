@@ -24,6 +24,14 @@ export const boards = {
     db.prepare('DELETE FROM boards WHERE id = ?').run(boardId);
   },
 
+  deleteWithTasks(boardId) {
+    const tx = db.transaction(() => {
+      db.prepare('DELETE FROM tasks WHERE board_id = ?').run(boardId);
+      db.prepare('DELETE FROM boards WHERE id = ?').run(boardId);
+    });
+    tx();
+  },
+
   // --- Task management ---
   addTask(boardId, title, description = '', position = null) {
     if (position === null) {

@@ -4,6 +4,7 @@ import { writeFile, unlink } from 'fs/promises';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { safeSend, stripMd } from '../bot-helpers.js';
+import { projectManager } from '../project-manager.js';
 
 const __msgDirname = dirname(fileURLToPath(import.meta.url));
 
@@ -153,6 +154,52 @@ export function registerMessages(bot, shared) {
       let output = result.stdout || result.stderr || 'No output';
       if (output.length > 3500) output = output.substring(0, 3500) + '...(truncated)';
       return ctx.reply(`${emoji}\n\`\`\`\n${output}\n\`\`\``, { parse_mode: 'Markdown' });
+    }
+
+    // Handle project keypoint addition
+    if (state.awaiting_input?.startsWith('proj_addkp:')) {
+      const projId = parseInt(state.awaiting_input.split(':')[1]);
+      userState.clearAwaiting(userId);
+      const proj = projectManager.get(projId);
+      if (!proj) return ctx.reply('Project not found.');
+      const kps = [...proj.keypoints, text.trim()];
+      projectManager.update(projId, { keypoints: kps });
+      await ctx.reply(`✅ Keypoint added: ${text.trim()}`);
+      const updated = projectManager.get(projId);
+      let detail = `🚀 *${stripMd(updated.title)}*\n\n*Keypoints:*\n`;
+      updated.keypoints.forEach((k, i) => { detail += `  ${i + 1}. ${stripMd(k)}\n`; });
+      await safeSend(ctx, detail, kb.projectView(projId, updated));
+      return;
+    }
+
+    // Handle project chat
+    if (state.awaiting_input?.startsWith('proj_chat:')) {
+      const projId = parseInt(state.awaiting_input.split(':')[1]);
+      const proj = projectManager.get(projId);
+      if (!proj) { userState.clearAwaiting(userId); return ctx.reply('Project not found.'); }
+      projectManager.addChat(projId, 'user', text);
+
+      try {
+        llm.initDefaults(userId);
+        const context = [
+          {
+            role: 'system',
+            content: `You are helping refine a ${proj.tech_stack} project called "${proj.title}".
+Description: ${proj.description}
+Current keypoints:\n${proj.keypoints.map((k, i) => `${i + 1}. ${k}`).join('\n')}
+
+Help the user refine this project. You can suggest adding/removing/modifying keypoints, changing tech stack, or answer questions about implementation.`
+          },
+          ...proj.chat_history.slice(-10).map(m => ({ role: m.role, content: m.content })),
+          { role: 'user', content: text }
+        ];
+        const result = await llm.chat(userId, context);
+        projectManager.addChat(projId, 'assistant', result.text);
+        await safeSend(ctx, `💬 ${result.text}\n\n_via ${result.provider}_`, kb.projectView(projId, proj));
+      } catch (err) {
+        await ctx.reply(`❌ ${err.message}`);
+      }
+      return;
     }
 
     // Check if message contains a URL -> smart link handling
