@@ -193,6 +193,21 @@ export const kb = {
     if (linkType === 'github_issue') {
       buttons.push([Markup.button.callback('🐛 Analyze Issue', `smart_analyze:${draftId}`)]);
     }
+    // Social media posts
+    const SOCIAL = ['twitter', 'reddit', 'instagram', 'facebook', 'linkedin', 'tiktok', 'threads', 'mastodon'];
+    if (SOCIAL.includes(linkType)) {
+      buttons.push([
+        Markup.button.callback('📖 Summarize Post', `smart_summarize:${draftId}`),
+        Markup.button.callback('💬 Discuss with AI', `smart_social_chat:${draftId}`),
+      ]);
+      buttons.push([
+        Markup.button.callback('🔍 Fact Check', `smart_social_factcheck:${draftId}`),
+        Markup.button.callback('✍️ Draft Reply', `smart_social_reply:${draftId}`),
+      ]);
+      if (linkType === 'reddit') {
+        buttons.push([Markup.button.callback('💡 Summarize Thread', `smart_social_thread:${draftId}`)]);
+      }
+    }
 
     // Universal smart action (always first if no type-specific ones)
     if (buttons.length === 0) {

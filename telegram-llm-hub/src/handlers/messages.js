@@ -12,7 +12,7 @@ export function registerMessages(bot, shared) {
   const { llm, sessions, userState, boards, drafts, workflows, NODE_TYPES, qa, kb,
           PROVIDER_REGISTRY, costTracker, gamification, challenges,
           pendingDevRequests, helpers } = shared;
-  const { extractUrl, detectLinkType, fetchLinkMeta } = shared.draftUtils;
+  const { extractUrl, detectLinkType, fetchLinkMeta, fetchSocialContent } = shared.draftUtils;
 
   // --- Main text handler ---
   bot.on('text', async (ctx) => {
@@ -153,6 +153,25 @@ export function registerMessages(bot, shared) {
       return ctx.reply(`\u2705 ${field} updated: ${values.join(', ')}`);
     }
 
+    // Handle social media chat (discuss a post with AI)
+    if (state.awaiting_input?.startsWith('social_chat:')) {
+      const draftId = parseInt(state.awaiting_input.split(':')[1]);
+      userState.clearAwaiting(userId);
+      const draft = drafts.get(draftId);
+      if (!draft) return ctx.reply('Draft not found.');
+      const postContent = (draft.content || draft.description || '').substring(0, 3000);
+      try {
+        const result = await llm.chat(userId, [
+          { role: 'system', content: `You are discussing a social media post with the user. Here is the post content:\n\nURL: ${draft.url}\nTitle: ${draft.title}\n\n${postContent}\n\nAnswer the user's question about this post. Be helpful and insightful.` },
+          { role: 'user', content: text },
+        ]);
+        await safeSend(ctx, `💬 ${result.text.substring(0, 3500)}\n\n_via ${result.provider}_`);
+      } catch (err) {
+        await ctx.reply(`❌ ${err.message}`);
+      }
+      return;
+    }
+
     // Handle CLI command for draft
     if (state.awaiting_input?.startsWith('draft_cli:')) {
       userState.clearAwaiting(userId);
@@ -215,17 +234,79 @@ Help the user refine this project. You can suggest adding/removing/modifying key
     if (url && !text.startsWith('/')) {
       const linkType = detectLinkType(url);
       const typeLabels = {
-        github_repo: '\ud83d\udce6 GitHub Repo', github_issue: '\ud83d\udc1b GitHub Issue', github_code: '\ud83d\udcbb GitHub Code',
-        github: '\ud83d\udc19 GitHub', youtube: '\ud83d\udcfa YouTube Video', youtube_playlist: '\ud83d\udcfa YouTube Playlist',
-        npm: '\ud83d\udce6 npm Package', pypi: '\ud83d\udce6 PyPI Package', docs: '\ud83d\udcd6 Documentation',
-        article: '\ud83d\udcf0 Article', stackoverflow: '\ud83d\udca1 StackOverflow', api: '\ud83c\udf10 API',
-        docker: '\ud83d\udc33 Docker Image', website: '\ud83d\udd17 Website',
+        github_repo: '📦 GitHub Repo', github_issue: '🐛 GitHub Issue', github_code: '💻 GitHub Code',
+        github: '🐙 GitHub', youtube: '📺 YouTube Video', youtube_playlist: '📺 YouTube Playlist',
+        npm: '📦 npm Package', pypi: '📦 PyPI Package', docs: '📖 Documentation',
+        article: '📰 Article', stackoverflow: '💡 StackOverflow', api: '🌐 API',
+        docker: '🐳 Docker Image', website: '🔗 Website',
+        twitter: '🐦 Twitter/X Post', reddit: '🤖 Reddit Post', instagram: '📷 Instagram',
+        facebook: '👤 Facebook Post', linkedin: '💼 LinkedIn Post', tiktok: '🎵 TikTok',
+        threads: '🧵 Threads', mastodon: '🐘 Mastodon',
       };
-      const typeLabel = typeLabels[linkType] || '\ud83d\udd17 Link';
+      const typeLabel = typeLabels[linkType] || '🔗 Link';
+      const SOCIAL_TYPES = ['twitter', 'reddit', 'instagram', 'facebook', 'linkedin', 'tiktok', 'threads', 'mastodon'];
+
+      // Social media: fetch post content and show it immediately
+      if (SOCIAL_TYPES.includes(linkType)) {
+        await ctx.reply(`${typeLabel} detected! Reading post content...`);
+        const social = await fetchSocialContent(url, linkType);
+        const meta = await fetchLinkMeta(url);
+
+        // Build rich content string for storage and display
+        let contentText = '';
+        if (social) {
+          contentText += social.author ? `Author: ${social.author}` : '';
+          contentText += social.handle ? ` (${social.handle})` : '';
+          contentText += social.subreddit ? ` in ${social.subreddit}` : '';
+          contentText += '\n';
+          if (social.title) contentText += `Title: ${social.title}\n`;
+          if (social.date) contentText += `Date: ${social.date}\n`;
+          contentText += '\n';
+          contentText += social.text || '';
+          if (social.topComments?.length > 0) {
+            contentText += '\n\n--- Top Comments ---\n';
+            for (const c of social.topComments) {
+              contentText += `u/${c.author} (${c.score} pts): ${c.text?.substring(0, 300)}\n\n`;
+            }
+          }
+        }
+
+        const draft = drafts.add(userId, url, social?.title || meta.title, social?.text?.substring(0, 500) || meta.description, contentText || meta.bodyText || '');
+
+        // Build display message
+        let msg = `📱 *${typeLabel}*\n\n`;
+        if (social) {
+          if (social.author) msg += `👤 *${stripMd(social.author)}*`;
+          if (social.handle) msg += ` (${stripMd(social.handle)})`;
+          if (social.subreddit) msg += ` in *${stripMd(social.subreddit)}*`;
+          msg += '\n';
+          if (social.title) msg += `\n📌 *${stripMd(social.title)}*\n`;
+          if (social.text) {
+            const preview = social.text.substring(0, 800);
+            msg += `\n${stripMd(preview)}${social.text.length > 800 ? '...' : ''}\n`;
+          }
+          if (social.score) msg += `\n⬆️ ${social.score} points`;
+          if (social.comments) msg += ` · 💬 ${social.comments} comments`;
+          if (social.likes) msg += `\n❤️ ${social.likes}`;
+          if (social.retweets) msg += ` · 🔁 ${social.retweets}`;
+          if (social.replies) msg += ` · 💬 ${social.replies}`;
+          msg += '\n';
+        } else {
+          // Fallback to meta tags
+          if (meta.title && meta.title !== url) msg += `*${stripMd(meta.title)}*\n`;
+          if (meta.description) msg += `${stripMd(meta.description).substring(0, 400)}\n`;
+          if (!meta.title && !meta.description) msg += `_Could not read post content (may be private)_\n`;
+        }
+
+        msg += `\n_Saved to drafts._ Pick an action:`;
+        return safeSend(ctx, msg, kb.draftActions(draft.id, linkType));
+      }
+
+      // Non-social links: existing behavior
       await ctx.reply(`${typeLabel} detected! Fetching info...`);
       const meta = await fetchLinkMeta(url);
       const draft = drafts.add(userId, url, meta.title, meta.description, meta.bodyText || '');
-      let contextMsg = `\ud83d\udce5 *Saved to Drafts*\n\n*${stripMd(meta.title || url)}*\n`;
+      let contextMsg = `📥 *Saved to Drafts*\n\n*${stripMd(meta.title || url)}*\n`;
       if (meta.description) contextMsg += `${stripMd(meta.description).substring(0, 200)}\n`;
       contextMsg += `\nType: ${typeLabel}\n`;
       if (linkType === 'github_repo' && meta.extra?.language) contextMsg += `Language: ${meta.extra.language}\n`;

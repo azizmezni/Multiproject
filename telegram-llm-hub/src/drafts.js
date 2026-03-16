@@ -55,6 +55,16 @@ export function detectLinkType(url) {
   if (/github\.com\/[\w-]+\/[\w.-]+\/(blob|tree)/i.test(url)) return 'github_code';
   if (u.includes('github.com')) return 'github';
 
+  // Social Media
+  if (u.includes('twitter.com/') || u.includes('x.com/')) return 'twitter';
+  if (u.includes('reddit.com/r/') || u.includes('redd.it/')) return 'reddit';
+  if (u.includes('instagram.com/p/') || u.includes('instagram.com/reel/')) return 'instagram';
+  if (u.includes('facebook.com/') || u.includes('fb.com/') || u.includes('fb.watch')) return 'facebook';
+  if (u.includes('linkedin.com/posts/') || u.includes('linkedin.com/feed/')) return 'linkedin';
+  if (u.includes('tiktok.com/') || u.includes('tiktok.com/@')) return 'tiktok';
+  if (u.includes('threads.net/')) return 'threads';
+  if (u.includes('mastodon.') || u.includes('/@') && u.includes('/statuses/')) return 'mastodon';
+
   // YouTube
   if (u.includes('youtube.com/watch') || u.includes('youtu.be/')) return 'youtube';
   if (u.includes('youtube.com/playlist')) return 'youtube_playlist';
@@ -77,6 +87,128 @@ export function detectLinkType(url) {
 
   // Generic website
   return 'website';
+}
+
+// Fetch social media post content using alternative frontends and APIs
+export async function fetchSocialContent(url, linkType) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 12000);
+  const headers = { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' };
+
+  try {
+    // Twitter/X — use fxtwitter.com or vxtwitter.com (returns OG tags with full text)
+    if (linkType === 'twitter') {
+      const fxUrl = url.replace(/https?:\/\/(twitter\.com|x\.com)/i, 'https://api.fxtwitter.com');
+      try {
+        const res = await fetch(fxUrl, { signal: controller.signal, headers });
+        if (res.ok) {
+          const data = await res.json();
+          const tweet = data.tweet || data;
+          clearTimeout(timeout);
+          return {
+            author: tweet.author?.name || tweet.author?.screen_name || 'Unknown',
+            handle: tweet.author?.screen_name ? `@${tweet.author.screen_name}` : '',
+            text: tweet.text || '',
+            likes: tweet.likes || 0,
+            retweets: tweet.retweets || 0,
+            replies: tweet.replies || 0,
+            date: tweet.created_at || '',
+            media: tweet.media?.photos?.map(p => p.url) || [],
+            platform: 'Twitter/X',
+          };
+        }
+      } catch {}
+      // Fallback: use vxtwitter OG embed
+      const vxUrl = url.replace(/https?:\/\/(twitter\.com|x\.com)/i, 'https://vxtwitter.com');
+      try {
+        const res = await fetch(vxUrl, { signal: controller.signal, headers, redirect: 'follow' });
+        const html = await res.text();
+        const desc = html.match(/<meta[^>]*property=["']og:description["'][^>]*content=["']([^"']+)["']/i);
+        const title = html.match(/<meta[^>]*property=["']og:title["'][^>]*content=["']([^"']+)["']/i);
+        clearTimeout(timeout);
+        return {
+          author: title?.[1] || 'Unknown',
+          handle: '',
+          text: desc?.[1]?.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>') || '',
+          platform: 'Twitter/X',
+        };
+      } catch {}
+    }
+
+    // Reddit — use .json endpoint (public, no auth needed)
+    if (linkType === 'reddit') {
+      let jsonUrl = url.replace(/\?.*$/, '').replace(/\/$/, '') + '.json';
+      try {
+        const res = await fetch(jsonUrl, { signal: controller.signal, headers: { ...headers, 'Accept': 'application/json' } });
+        if (res.ok) {
+          const data = await res.json();
+          const post = data?.[0]?.data?.children?.[0]?.data;
+          if (post) {
+            const topComments = (data?.[1]?.data?.children || [])
+              .filter(c => c.kind === 't1')
+              .slice(0, 5)
+              .map(c => ({ author: c.data.author, text: c.data.body?.substring(0, 500), score: c.data.score }));
+            clearTimeout(timeout);
+            return {
+              author: post.author || 'Unknown',
+              handle: `u/${post.author}`,
+              subreddit: post.subreddit_name_prefixed || '',
+              title: post.title || '',
+              text: post.selftext?.substring(0, 3000) || '',
+              score: post.score || 0,
+              comments: post.num_comments || 0,
+              url: post.url,
+              topComments,
+              platform: 'Reddit',
+            };
+          }
+        }
+      } catch {}
+    }
+
+    // Instagram, Facebook, LinkedIn, TikTok, Threads — use OG tags (works for public posts)
+    if (['instagram', 'facebook', 'linkedin', 'tiktok', 'threads', 'mastodon'].includes(linkType)) {
+      try {
+        const res = await fetch(url, { signal: controller.signal, headers, redirect: 'follow' });
+        const html = await res.text();
+        const ogTitle = html.match(/<meta[^>]*property=["']og:title["'][^>]*content=["']([^"']+)["']/i);
+        const ogDesc = html.match(/<meta[^>]*property=["']og:description["'][^>]*content=["']([^"']+)["']/i);
+        const ogImage = html.match(/<meta[^>]*property=["']og:image["'][^>]*content=["']([^"']+)["']/i);
+        // Try Twitter card tags too
+        const twDesc = html.match(/<meta[^>]*name=["']twitter:description["'][^>]*content=["']([^"']+)["']/i);
+        const twTitle = html.match(/<meta[^>]*name=["']twitter:title["'][^>]*content=["']([^"']+)["']/i);
+
+        const decode = (s) => s?.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'") || '';
+
+        // For Instagram, try to extract more from LD+JSON
+        let extraText = '';
+        if (linkType === 'instagram') {
+          const ldJson = html.match(/<script[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/i);
+          if (ldJson) {
+            try {
+              const ld = JSON.parse(ldJson[1]);
+              extraText = ld.articleBody || ld.description || ld.caption || '';
+            } catch {}
+          }
+        }
+
+        clearTimeout(timeout);
+        const platformNames = { instagram: 'Instagram', facebook: 'Facebook', linkedin: 'LinkedIn', tiktok: 'TikTok', threads: 'Threads', mastodon: 'Mastodon' };
+        return {
+          author: decode(ogTitle?.[1] || twTitle?.[1]) || 'Unknown',
+          text: decode(ogDesc?.[1] || twDesc?.[1]) || extraText || '',
+          image: ogImage?.[1] || '',
+          platform: platformNames[linkType] || linkType,
+        };
+      } catch {}
+    }
+
+    clearTimeout(timeout);
+    return null;
+  } catch {
+    clearTimeout(timeout);
+    return null;
+  }
 }
 
 // Simple metadata extraction from URL

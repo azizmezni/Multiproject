@@ -4,7 +4,7 @@ import { projectManager } from '../project-manager.js';
 
 export function registerDrafts(bot, shared) {
   const { llm, drafts, boards, kb, userState, qa, helpers } = shared;
-  const { detectLinkType } = shared.draftUtils;
+  const { detectLinkType, fetchSocialContent } = shared.draftUtils;
 
   bot.command('drafts', async (ctx) => {
     await helpers.showDrafts(ctx, ctx.from.id);
@@ -502,6 +502,99 @@ Rules:
       await safeSend(ctx, `\ud83c\udf10 *API Test Result*\n\nStatus: ${res.status}\nContent-Type: ${contentType}\n\n\`\`\`\n${body.substring(0, 1500)}\n\`\`\``);
     } catch (err) {
       await ctx.reply(`\u274c API test failed: ${err.message}`);
+    }
+  });
+
+  // --- Social Media Actions ---
+
+  // Discuss a social post with AI (interactive chat about the content)
+  bot.action(/smart_social_chat:(\d+)/, async (ctx) => {
+    await ctx.answerCbQuery();
+    const draft = drafts.get(parseInt(ctx.match[1]));
+    if (!draft) return;
+    userState.setAwaiting(ctx.from.id, `social_chat:${draft.id}`);
+    await ctx.editMessageText(
+      '💬 *Chat about this post*\n\n' +
+      'Ask me anything about this post — opinions, context, related topics, or what to do with this info.\n\n' +
+      '_Send your question:_',
+      { parse_mode: 'Markdown' }
+    );
+  });
+
+  // Fact-check a social post
+  bot.action(/smart_social_factcheck:(\d+)/, async (ctx) => {
+    await ctx.answerCbQuery();
+    const draft = drafts.get(parseInt(ctx.match[1]));
+    if (!draft) return;
+    await ctx.editMessageText('🔍 Fact-checking post...');
+    const userId = ctx.from.id;
+    llm.initDefaults(userId);
+    const postContent = (draft.content || draft.description || '').substring(0, 3000);
+    try {
+      const result = await llm.chat(userId, [
+        { role: 'system', content: 'You are a fact-checker. Analyze the following social media post for accuracy. Identify:\n1. **Claims made** — list each factual claim\n2. **Accuracy assessment** — rate each claim (Likely True / Unverified / Likely False / Opinion)\n3. **Missing context** — what important context is left out?\n4. **Red flags** — misleading framing, cherry-picked data, logical fallacies\n5. **Overall reliability** — brief assessment\n\nBe balanced and fair. Distinguish facts from opinions.' },
+        { role: 'user', content: `Fact-check this post:\n\nURL: ${draft.url}\nTitle: ${draft.title}\n\nContent:\n${postContent}` },
+      ]);
+      const linkType = detectLinkType(draft.url);
+      await safeSend(ctx, `🔍 *Fact Check*\n\n${result.text.substring(0, 3500)}\n\n_via ${result.provider}_`, kb.draftActions(draft.id, linkType));
+    } catch (err) {
+      await ctx.reply(`❌ Error: ${err.message}`);
+    }
+  });
+
+  // Draft a reply to a social post
+  bot.action(/smart_social_reply:(\d+)/, async (ctx) => {
+    await ctx.answerCbQuery();
+    const draft = drafts.get(parseInt(ctx.match[1]));
+    if (!draft) return;
+    await ctx.editMessageText('✍️ Drafting reply...');
+    const userId = ctx.from.id;
+    llm.initDefaults(userId);
+    const postContent = (draft.content || draft.description || '').substring(0, 3000);
+    const linkType = detectLinkType(draft.url);
+    try {
+      const result = await llm.chat(userId, [
+        { role: 'system', content: 'You are a social media expert. Draft 3 different reply options for this post:\n1. **Agreeing/Supportive** — thoughtful agreement with added value\n2. **Constructive/Nuanced** — balanced take that adds perspective\n3. **Question/Engagement** — asks a smart follow-up question\n\nKeep each reply concise and appropriate for the platform. No hashtag spam.' },
+        { role: 'user', content: `Draft replies for this post:\n\nURL: ${draft.url}\nPlatform: ${linkType}\nContent:\n${postContent}` },
+      ]);
+      await safeSend(ctx, `✍️ *Draft Replies*\n\n${result.text.substring(0, 3500)}\n\n_via ${result.provider}_`, kb.draftActions(draft.id, linkType));
+    } catch (err) {
+      await ctx.reply(`❌ Error: ${err.message}`);
+    }
+  });
+
+  // Summarize Reddit thread (post + top comments)
+  bot.action(/smart_social_thread:(\d+)/, async (ctx) => {
+    await ctx.answerCbQuery();
+    const draft = drafts.get(parseInt(ctx.match[1]));
+    if (!draft) return;
+    await ctx.editMessageText('💡 Summarizing thread...');
+    const userId = ctx.from.id;
+    llm.initDefaults(userId);
+
+    // Re-fetch with social reader for fresh comment data
+    let freshContent = draft.content || '';
+    if (detectLinkType(draft.url) === 'reddit') {
+      const social = await fetchSocialContent(draft.url, 'reddit');
+      if (social) {
+        freshContent = `Title: ${social.title}\nAuthor: ${social.author}\nSubreddit: ${social.subreddit}\nScore: ${social.score} | Comments: ${social.comments}\n\nPost:\n${social.text}\n`;
+        if (social.topComments?.length > 0) {
+          freshContent += '\n--- Top Comments ---\n';
+          for (const c of social.topComments) {
+            freshContent += `u/${c.author} (${c.score} pts):\n${c.text}\n\n`;
+          }
+        }
+      }
+    }
+
+    try {
+      const result = await llm.chat(userId, [
+        { role: 'system', content: 'You are a Reddit thread summarizer. Analyze the post and comments:\n1. **Post summary** — what the OP is saying/asking\n2. **Community consensus** — what most commenters agree on\n3. **Dissenting views** — notable disagreements or alternative takes\n4. **Best advice/answer** — the most helpful comment(s)\n5. **Key takeaways** — 3-5 bullet points of actionable insights\n\nBe concise and capture the real signal from the discussion.' },
+        { role: 'user', content: `Summarize this Reddit thread:\n\n${freshContent.substring(0, 4000)}` },
+      ]);
+      await safeSend(ctx, `💡 *Thread Summary*\n\n${result.text.substring(0, 3500)}\n\n_via ${result.provider}_`, kb.draftActions(draft.id, 'reddit'));
+    } catch (err) {
+      await ctx.reply(`❌ Error: ${err.message}`);
     }
   });
 }

@@ -3,7 +3,7 @@ import db from './db.js';
 import { llm } from './llm-manager.js';
 import { sessions, userState } from './sessions.js';
 import { boards } from './boards.js';
-import { drafts, extractUrl, fetchLinkMeta, detectLinkType } from './drafts.js';
+import { drafts, extractUrl, fetchLinkMeta, detectLinkType, fetchSocialContent } from './drafts.js';
 import { qa } from './qa.js';
 import { kb } from './keyboards.js';
 import { PROVIDER_REGISTRY } from './providers.js';
@@ -51,7 +51,7 @@ export function createBot(token) {
     memory, arena, challenges, costTracker, gamification,
     templates, vault, collaboration,
     pendingDevRequests, runningBoards, stripMd, safeSend,
-    draftUtils: { extractUrl, fetchLinkMeta, detectLinkType },
+    draftUtils: { extractUrl, fetchLinkMeta, detectLinkType, fetchSocialContent },
     helpers: null,          // set below
     handleDevRequest: null, // set by dev-assistant handler
     runAutoFix: null,       // set by workflows handler
