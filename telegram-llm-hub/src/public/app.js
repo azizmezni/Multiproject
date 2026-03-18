@@ -81,6 +81,53 @@ function updateHeader() {
   const badge = document.getElementById('level-badge');
   const levelData = state.stats.levels?.find(l => l.level === s.level);
   if (levelData) badge.style.borderColor = levelData.color;
+  updateActiveProviderWidget();
+}
+
+// Active provider widget in header
+function updateActiveProviderWidget() {
+  const providers = state.providers || [];
+  const enabled = providers.filter(p => p.enabled);
+  // Active = first enabled provider with a key (or local)
+  const active = enabled.find(p => p.api_key || p.is_local) || enabled[0];
+  const nameEl = document.getElementById('apw-name');
+  if (active) {
+    nameEl.textContent = active.display_name;
+  } else {
+    nameEl.textContent = 'None';
+  }
+  // Build dropdown menu
+  const menu = document.getElementById('apw-menu');
+  menu.innerHTML = enabled.map(p => {
+    const isActive = active && p.name === active.name;
+    const hasKey = p.api_key || p.is_local;
+    const dotClass = hasKey ? 'on' : 'nokey';
+    return `<div class="apw-item ${isActive ? 'active' : ''}" onclick="switchActiveProvider('${p.name}')">
+      <span class="apw-dot ${dotClass}"></span>
+      <span>${escapeHtml(p.display_name)}</span>
+      <span class="apw-item-model">${escapeHtml(p.model)}</span>
+    </div>`;
+  }).join('') + (enabled.length === 0 ? '<div class="apw-item" style="color:var(--text2)">No providers enabled</div>' : '');
+}
+
+function toggleProviderDropdown() {
+  const dd = document.getElementById('apw-dropdown');
+  dd.classList.toggle('open');
+  // Close on outside click
+  if (dd.classList.contains('open')) {
+    const close = (e) => { if (!dd.contains(e.target)) { dd.classList.remove('open'); document.removeEventListener('click', close); } };
+    setTimeout(() => document.addEventListener('click', close), 0);
+  }
+}
+
+async function switchActiveProvider(name) {
+  document.getElementById('apw-dropdown').classList.remove('open');
+  const target = (state.providers || []).find(p => p.name === name);
+  if (!target) return;
+  await PUT(`/providers/${name}/set-active`, {});
+  await refreshAll();
+  if (state.activeSection === 'providers') renderProviders(document.getElementById('content'));
+  showToast(`Switched to ${target.display_name}`, 'success');
 }
 
 // ===================== SECTIONS =====================
@@ -88,7 +135,7 @@ function showSection(name) {
   state.activeSection = name;
   document.querySelectorAll('.nav-btn').forEach(b => b.classList.toggle('active', b.dataset.section === name));
   const content = document.getElementById('content');
-  const renderers = { home: renderHome, providers: renderProviders, boards: renderGenProjects, workflows: renderWorkflows, drafts: renderDrafts, projects: renderProjects, chat: renderChat, achievements: renderAchievements, templates: renderTemplates, arena: renderArena, memory: renderMemory, costs: renderCosts, challenges: renderChallenges, vault: renderVault, plugins: renderPlugins, leaderboard: renderLeaderboard, collaboration: renderCollaboration, selfimprove: renderSelfImprove };
+  const renderers = { home: renderHome, providers: renderProviders, boards: renderGenProjects, workflows: renderWorkflows, drafts: renderDrafts, projects: renderProjects, chat: renderChat, achievements: renderAchievements, templates: renderTemplates, arena: renderArena, memory: renderMemory, costs: renderCosts, challenges: renderChallenges, vault: renderVault, plugins: renderPlugins, leaderboard: renderLeaderboard, collaboration: renderCollaboration, selfimprove: renderSelfImprove, gitrepos: renderGitRepos };
   const fn = renderers[name];
   if (fn) fn(content);
 }
@@ -230,16 +277,127 @@ async function submitKey(name) {
   renderProviders(document.getElementById('content'));
 }
 
-function promptSetModel(name, displayName) {
+async function promptSetModel(name, displayName) {
   const reg = state.registry.find(r => r.name === name) || {};
-  const models = reg.models || [];
+
+  // For dynamic providers, fetch live models from the server
+  if (reg.dynamicModels) {
+    showModal(`📊 Set Model — ${displayName}`, `
+      <div class="form-group" id="model-list-container" style="max-height:400px;overflow-y:auto">
+        <div style="text-align:center;padding:20px;color:var(--text2)">
+          <div style="font-size:24px;margin-bottom:8px">⏳</div>
+          Fetching models from ${escapeHtml(displayName)}...
+        </div>
+      </div>
+      <div style="margin-top:8px;display:flex;gap:6px;align-items:center">
+        <input class="input" id="modal-custom-model" placeholder="Or type a custom model ID..." style="flex:1;font-size:12px">
+        <button class="btn btn-primary btn-sm" onclick="submitModel('${name}',document.getElementById('modal-custom-model').value)">Set</button>
+      </div>
+      <div style="margin-top:6px;display:flex;gap:6px">
+        <button class="btn btn-sm" onclick="fetchLiveModels('${name}','${escapeHtml(displayName)}')">🔄 Refresh</button>
+        <button class="btn btn-sm" onclick="closeModal()">Cancel</button>
+      </div>
+    `);
+    await fetchLiveModels(name, displayName);
+  } else if (reg.modelGroups) {
+    // Static grouped UI (fallback)
+    showModelGroupsModal(name, displayName, reg.modelGroups);
+  } else {
+    const models = reg.models || [];
+    showModal(`📊 Set Model — ${displayName}`, `
+      <div class="form-group">
+        <label class="form-label">Select Model</label>
+        ${models.map(m => `<button class="btn" style="margin:4px" onclick="submitModel('${name}','${m}')">${m}</button>`).join('')}
+      </div>
+      <button class="btn" onclick="closeModal()">Cancel</button>
+    `);
+  }
+}
+
+function showModelGroupsModal(name, displayName, groups) {
+  let groupsHtml = '';
+  for (const [groupName, models] of Object.entries(groups)) {
+    const isFree = groupName.includes('Free');
+    groupsHtml += `
+      <div style="margin-bottom:12px">
+        <div style="font-weight:700;font-size:13px;margin-bottom:6px;color:${isFree ? 'var(--green)' : 'var(--purple)'}">${groupName}</div>
+        <div style="display:flex;flex-wrap:wrap;gap:4px">
+          ${models.map(m => {
+            const short = m.split('/').pop();
+            return `<button class="btn btn-sm" style="font-size:11px;padding:3px 8px" onclick="submitModel('${name}','${m}')" title="${m}">${short}</button>`;
+          }).join('')}
+        </div>
+      </div>`;
+  }
   showModal(`📊 Set Model — ${displayName}`, `
-    <div class="form-group">
-      <label class="form-label">Select Model</label>
-      ${models.map(m => `<button class="btn" style="margin:4px" onclick="submitModel('${name}','${m}')">${m}</button>`).join('')}
+    <div class="form-group" style="max-height:400px;overflow-y:auto">${groupsHtml}</div>
+    <div style="margin-top:8px;display:flex;gap:6px;align-items:center">
+      <input class="input" id="modal-custom-model" placeholder="Or type a custom model ID..." style="flex:1;font-size:12px">
+      <button class="btn btn-primary btn-sm" onclick="submitModel('${name}',document.getElementById('modal-custom-model').value)">Set</button>
     </div>
-    <button class="btn" onclick="closeModal()">Cancel</button>
+    <button class="btn" style="margin-top:8px" onclick="closeModal()">Cancel</button>
   `);
+}
+
+async function fetchLiveModels(name, displayName) {
+  const container = document.getElementById('model-list-container');
+  if (!container) return;
+  const reg = state.registry.find(r => r.name === name) || {};
+
+  try {
+    const data = await GET(`/providers/${name}/models`);
+    const liveModels = data.models || [];
+
+    if (liveModels.length === 0 && !reg.modelGroups) {
+      // No live models, fall back to static list
+      const fallback = reg.models || [];
+      container.innerHTML = `
+        <div style="color:var(--yellow);font-size:12px;margin-bottom:8px">⚠️ Couldn't fetch live models${data.error ? ': ' + escapeHtml(data.error) : ''}. Showing defaults:</div>
+        <div style="display:flex;flex-wrap:wrap;gap:4px">
+          ${fallback.map(m => `<button class="btn btn-sm" style="font-size:11px;padding:3px 8px" onclick="submitModel('${name}','${m}')">${m}</button>`).join('')}
+        </div>`;
+      return;
+    }
+
+    let html = '';
+
+    // For OpenRouter: group into Free vs Premium from live data
+    if (name === 'openrouter') {
+      const freeModels = liveModels.filter(m => m.id.includes(':free') || m.id === 'openrouter/free' || m.id === 'openrouter/auto');
+      const otherModels = liveModels.filter(m => !m.id.includes(':free') && m.id !== 'openrouter/free' && m.id !== 'openrouter/auto');
+      html += renderModelGroup('🆓 Free Models (' + freeModels.length + ')', freeModels, name, 'var(--green)');
+      if (otherModels.length > 0) {
+        html += renderModelGroup('💎 Other Free', otherModels, name, 'var(--cyan)');
+      }
+      // Also show static premium
+      if (reg.modelGroups?.['💎 Premium (key required)']) {
+        const premium = reg.modelGroups['💎 Premium (key required)'].map(id => ({ id, name: id }));
+        html += renderModelGroup('💎 Premium (key required)', premium, name, 'var(--purple)');
+      }
+    } else {
+      // Ollama / LM Studio: show live models with size info
+      const label = `🖥️ Available Models (${liveModels.length})`;
+      html += renderModelGroup(label, liveModels, name, 'var(--cyan)');
+    }
+
+    container.innerHTML = html || '<div style="color:var(--text2);padding:12px">No models found</div>';
+  } catch (err) {
+    container.innerHTML = `<div style="color:var(--red);padding:12px">❌ Failed to fetch: ${escapeHtml(err.message)}</div>`;
+  }
+}
+
+function renderModelGroup(title, models, provName, color) {
+  return `
+    <div style="margin-bottom:12px">
+      <div style="font-weight:700;font-size:13px;margin-bottom:6px;color:${color}">${title}</div>
+      <div style="display:flex;flex-wrap:wrap;gap:4px">
+        ${models.map(m => {
+          const short = m.id.split('/').pop();
+          const sizeTag = m.size ? ` <span style="font-size:9px;color:var(--text2)">${m.size}</span>` : '';
+          return `<button class="btn btn-sm" style="font-size:11px;padding:3px 8px" onclick="submitModel('${provName}','${m.id}')" title="${m.id}">${short}${sizeTag}</button>`;
+        }).join('')}
+      </div>
+    </div>`;
 }
 
 async function submitModel(name, model) {
@@ -3201,6 +3359,263 @@ async function clearSelfImproveHistory() {
   try {
     await POST('/self-improve/clear');
     renderSelfImprove(document.getElementById('content'));
+  } catch (err) {
+    showToast('❌', err.message);
+  }
+}
+
+// ===================== GIT REPOS =====================
+let gitRepoPollInterval = null;
+
+async function renderGitRepos(el) {
+  let repos = [];
+  try {
+    repos = await GET('/git-repos');
+    if (!Array.isArray(repos)) repos = [];
+  } catch (err) {
+    el.innerHTML = `
+      <div class="section-title"><span class="icon">📚</span> Git Repos</div>
+      <div class="card" style="text-align:center;padding:40px">
+        <div style="color:var(--red)">❌ Failed to load repos: ${escapeHtml(err.message)}</div>
+        <p style="color:var(--text3);margin-top:8px">Make sure the dashboard server is restarted after the update.</p>
+        <button class="btn" style="background:var(--cyan);color:#000;margin-top:12px" onclick="renderGitRepos(document.getElementById('content'))">🔄 Retry</button>
+      </div>`;
+    return;
+  }
+
+  const typeIcons = { node: '🟢', python: '🐍', rust: '🦀', go: '🔵', unknown: '📦' };
+  const statusColors = { cloned: 'green', running: 'cyan', cloning: 'orange', error: 'red' };
+
+  el.innerHTML = `
+    <div class="section-title">
+      <span class="icon">📚</span> Git Repos
+      <button class="btn" style="background:var(--cyan);color:#000;margin-left:auto;font-size:12px" onclick="promptCloneRepo()">+ Clone Repo</button>
+    </div>
+    ${repos.length === 0 ? `
+      <div class="card" style="text-align:center;padding:40px">
+        <div style="font-size:48px;margin-bottom:16px">📚</div>
+        <h3 style="color:var(--text1)">No Git Repos Yet</h3>
+        <p style="color:var(--text3);margin:12px 0">Clone a repo from GitHub, GitLab, or any Git URL</p>
+        <button class="btn" style="background:var(--cyan);color:#000" onclick="promptCloneRepo()">📥 Clone Your First Repo</button>
+      </div>
+    ` : repos.map(r => `
+        <div class="card" style="cursor:pointer;margin-bottom:8px" onclick="viewGitRepo(${r.id})">
+          <div style="display:flex;justify-content:space-between;align-items:flex-start">
+            <div style="flex:1;min-width:0">
+              <div style="font-weight:700;font-size:14px;color:var(--text1)">${typeIcons[r.project_type] || '📦'} ${escapeHtml(r.name)}</div>
+              <div style="font-size:11px;color:var(--text3);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(r.url)}</div>
+              ${r.readme_summary ? `<div style="font-size:12px;color:var(--text2);margin-top:6px">${escapeHtml(r.readme_summary).substring(0, 100)}</div>` : ''}
+              ${(r.skills || []).length > 0 ? `<div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:6px">${r.skills.slice(0, 5).map(s => `<span style="font-size:10px;padding:2px 6px;background:rgba(99,102,241,0.2);color:var(--purple);border-radius:4px">${escapeHtml(s)}</span>`).join('')}</div>` : ''}
+            </div>
+            <div style="display:flex;flex-direction:column;gap:4px;align-items:flex-end;margin-left:8px">
+              <span style="font-size:10px;padding:2px 8px;border-radius:4px;background:var(--${statusColors[r.status] || 'blue'});color:#000;font-weight:600">${r._running ? '● Running' : r.status}</span>
+              <div style="display:flex;gap:4px">
+                <button class="btn" style="font-size:11px;padding:2px 8px;background:${r._running ? 'var(--red)' : 'var(--green)'};color:#000" onclick="event.stopPropagation();toggleGitRepo(${r.id},${r._running})">${r._running ? '⏹' : '▶️'}</button>
+                <button class="btn" style="font-size:11px;padding:2px 8px;background:var(--surface2)" onclick="event.stopPropagation();deleteGitRepo(${r.id})">🗑</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      `).join('')}`;
+}
+
+async function viewGitRepo(id) {
+  if (gitRepoPollInterval) { clearInterval(gitRepoPollInterval); gitRepoPollInterval = null; }
+  let repo;
+  try {
+    repo = await GET(`/git-repos/${id}`);
+  } catch (err) {
+    showToast('❌', err.message);
+    return;
+  }
+  if (!repo) return;
+  const el = document.getElementById('content');
+  const typeNames = { node: '🟢 Node.js', python: '🐍 Python', rust: '🦀 Rust', go: '🔵 Go', unknown: '📦 Unknown' };
+
+  el.innerHTML = `
+    <div class="section-title">
+      <span class="icon">📚</span> ${escapeHtml(repo.name)}
+      <button class="btn" style="font-size:12px;margin-left:auto" onclick="renderGitRepos(document.getElementById('content'))">◀️ Back</button>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+      <div class="card">
+        <h3 style="color:var(--cyan);margin-bottom:12px">ℹ️ Info</h3>
+        <div style="font-size:13px;color:var(--text2);line-height:1.8">
+          <div>🔗 <a href="${escapeHtml(repo.url)}" target="_blank" style="color:var(--cyan)">${escapeHtml(repo.url)}</a></div>
+          <div>📦 Type: ${typeNames[repo.project_type] || repo.project_type}</div>
+          <div>▶️ Run: <code style="background:var(--surface2);padding:2px 6px;border-radius:3px">${escapeHtml(repo.run_cmd || 'N/A')}</code></div>
+          <div>📥 Install: <code style="background:var(--surface2);padding:2px 6px;border-radius:3px">${escapeHtml(repo.install_cmd || 'N/A')}</code></div>
+          ${repo.readme_summary ? `<div style="margin-top:8px">📝 ${escapeHtml(repo.readme_summary)}</div>` : ''}
+          ${repo.skills.length > 0 ? `<div style="margin-top:8px">🧠 Skills: ${repo.skills.map(s => `<span style="font-size:11px;padding:2px 8px;background:rgba(99,102,241,0.2);color:var(--purple);border-radius:4px;margin:2px">${escapeHtml(s)}</span>`).join(' ')}</div>` : ''}
+          <div style="font-size:11px;color:var(--text3);margin-top:8px">📁 ${escapeHtml(repo.clone_dir)}</div>
+        </div>
+      </div>
+      <div class="card" id="git-actions-card">
+        <h3 style="color:var(--cyan);margin-bottom:12px">⚡ Actions</h3>
+        <div style="display:flex;flex-wrap:wrap;gap:8px">
+          ${repo._running
+            ? `<button class="btn" style="background:var(--red);color:#000" onclick="toggleGitRepo(${id},true)">⏹ Stop</button>`
+            : `<button class="btn" style="background:var(--green);color:#000" onclick="toggleGitRepo(${id},false)">▶️ Run</button>`
+          }
+          <button class="btn" style="background:var(--purple);color:#000" onclick="pullGitRepo(${id})">🔄 Git Pull</button>
+          <button class="btn" style="background:var(--orange,#f97316);color:#000" onclick="reanalyzeGitRepo(${id})">🔍 Re-analyze</button>
+          <button class="btn" style="background:var(--cyan);color:#000" onclick="openGitRepoTerminal(${id})">🖥️ Terminal</button>
+          <button class="btn" style="background:var(--yellow);color:#000" onclick="openGitRepoFolder(${id})">📂 Folder</button>
+          <button class="btn" style="background:var(--red);color:#000" onclick="deleteGitRepo(${id})">🗑 Delete</button>
+        </div>
+        ${repo._running && repo._port ? `<div style="margin-top:12px;font-size:12px;color:var(--green)">● Running on port ${repo._port}</div>` : ''}
+      </div>
+    </div>
+    <div class="card" style="margin-top:16px">
+      <h3 style="color:var(--cyan);margin-bottom:12px">📋 Logs</h3>
+      <pre id="git-run-logs" style="background:var(--surface1);color:var(--text2);padding:12px;border-radius:8px;max-height:400px;overflow:auto;font-size:12px;white-space:pre-wrap;word-break:break-word">Click Run to start the project...</pre>
+    </div>`;
+
+  // Load existing logs and start polling
+  loadGitRepoLogs(id);
+  gitRepoPollInterval = setInterval(() => loadGitRepoLogs(id), 2000);
+}
+
+async function loadGitRepoLogs(id) {
+  try {
+    const data = await GET(`/git-repos/${id}/logs`);
+    const el = document.getElementById('git-run-logs');
+    if (el && data.logs && data.logs.trim()) {
+      el.textContent = data.logs;
+      el.scrollTop = el.scrollHeight;
+    }
+    if (!data.running && gitRepoPollInterval) {
+      // Keep polling for a bit in case auto-fix restarts
+      const phase = data.phase;
+      if (phase !== 'installing') {
+        // Actually stopped
+      }
+    }
+  } catch {}
+}
+
+function promptCloneRepo() {
+  const el = document.getElementById('content');
+  const existing = el.innerHTML;
+  // Create modal overlay
+  const modal = document.createElement('div');
+  modal.id = 'clone-modal';
+  modal.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.7);display:flex;align-items:center;justify-content:center;z-index:1000';
+  modal.innerHTML = `
+    <div style="background:var(--surface1);border:1px solid var(--border);border-radius:12px;padding:24px;width:500px;max-width:90vw">
+      <h3 style="color:var(--cyan);margin-bottom:16px">📥 Clone Git Repo</h3>
+      <input id="clone-url-input" class="input" style="width:100%;padding:10px;background:var(--surface2);border:1px solid var(--border);color:var(--text1);border-radius:8px;font-size:14px" placeholder="https://github.com/user/repo" autofocus>
+      <div style="display:flex;gap:8px;margin-top:16px;justify-content:flex-end">
+        <button class="btn" style="background:var(--surface2)" onclick="document.getElementById('clone-modal').remove()">Cancel</button>
+        <button class="btn" style="background:var(--cyan);color:#000" onclick="cloneGitRepo()">📥 Clone</button>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+  setTimeout(() => document.getElementById('clone-url-input')?.focus(), 100);
+  // Enter key
+  document.getElementById('clone-url-input').addEventListener('keydown', e => {
+    if (e.key === 'Enter') cloneGitRepo();
+  });
+}
+
+async function cloneGitRepo() {
+  const input = document.getElementById('clone-url-input');
+  const url = input?.value?.trim();
+  if (!url) return;
+  document.getElementById('clone-modal')?.remove();
+
+  showToast('📥', 'Cloning repo...');
+  try {
+    const res = await fetch('/api/git-repos/clone', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url }),
+    });
+    const data = await res.json();
+    if (data.status === 'exists') {
+      showToast('📚', 'Repo already tracked!');
+    } else {
+      showToast('✅', 'Clone started! Refresh in a moment...');
+    }
+    // Refresh after a delay to let clone finish
+    setTimeout(() => renderGitRepos(document.getElementById('content')), 5000);
+    // Keep checking
+    setTimeout(() => renderGitRepos(document.getElementById('content')), 15000);
+    setTimeout(() => renderGitRepos(document.getElementById('content')), 30000);
+  } catch (err) {
+    showToast('❌', err.message);
+  }
+}
+
+async function toggleGitRepo(id, isRunning) {
+  try {
+    if (isRunning) {
+      await POST(`/git-repos/${id}/stop`);
+      showToast('⏹', 'Stopped');
+    } else {
+      await POST(`/git-repos/${id}/run`);
+      showToast('▶️', 'Starting...');
+    }
+    // Refresh view
+    if (document.getElementById('git-run-logs')) {
+      viewGitRepo(id);
+    } else {
+      setTimeout(() => renderGitRepos(document.getElementById('content')), 1000);
+    }
+  } catch (err) {
+    showToast('❌', err.message);
+  }
+}
+
+async function deleteGitRepo(id) {
+  if (!confirm('Delete this repo? This removes it from tracking.')) return;
+  try {
+    await fetch(`/api/git-repos/${id}`, { method: 'DELETE' });
+    showToast('🗑', 'Deleted');
+    renderGitRepos(document.getElementById('content'));
+  } catch (err) {
+    showToast('❌', err.message);
+  }
+}
+
+async function pullGitRepo(id) {
+  showToast('🔄', 'Pulling...');
+  try {
+    const res = await POST(`/git-repos/${id}/pull`);
+    showToast(res.ok ? '✅' : '⚠️', res.ok ? 'Pull complete' : (res.stderr || 'Pull had issues'));
+  } catch (err) {
+    showToast('❌', err.message);
+  }
+}
+
+async function reanalyzeGitRepo(id) {
+  showToast('🔍', 'Re-analyzing repo with LLM...');
+  try {
+    const res = await POST(`/git-repos/${id}/reanalyze`);
+    if (res.ok) {
+      showToast('✅', `Detected: ${res.runCmd || 'N/A'}`);
+      viewGitRepo(id); // refresh the view
+    } else {
+      showToast('❌', res.error || 'Re-analysis failed');
+    }
+  } catch (err) {
+    showToast('❌', err.message);
+  }
+}
+
+async function openGitRepoTerminal(id) {
+  try {
+    await POST(`/git-repos/${id}/open-terminal`);
+    showToast('🖥️', 'Terminal opened');
+  } catch (err) {
+    showToast('❌', err.message);
+  }
+}
+
+async function openGitRepoFolder(id) {
+  try {
+    await POST(`/git-repos/${id}/open-folder`);
+    showToast('📂', 'Folder opened');
   } catch (err) {
     showToast('❌', err.message);
   }

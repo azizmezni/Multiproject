@@ -22,6 +22,7 @@ import { templates } from './templates.js';
 import { plugins } from './plugins.js';
 import featureRoutes, { setUserIdResolver } from './routes/features.js';
 import { projectManager } from './project-manager.js';
+import { gitRepoManager, analyzeRepo, generateRunPlan, diagnoseStepFailure } from './git-repos.js';
 import { autoFixLoop } from './auto-fix.js';
 import crypto from 'crypto';
 
@@ -106,7 +107,9 @@ export function createDashboard(port = 9999) {
     const providers = llm.getProviders(userId);
     const registry = Object.entries(PROVIDER_REGISTRY).map(([k, v]) => ({
       name: k, displayName: v.name, models: v.models, docs: v.docs,
-      description: v.description, isLocal: !!v.isLocal,
+      description: v.description, tagline: v.tagline || '', isLocal: !!v.isLocal,
+      modelGroups: v.modelGroups || null,
+      dynamicModels: !!v.dynamicModels,
     }));
     res.json({ providers, registry });
   });
@@ -123,6 +126,13 @@ export function createDashboard(port = 9999) {
     res.json({ ok: true });
   });
 
+  // Set a provider as the active (top priority) one
+  app.put('/api/providers/:name/set-active', (req, res) => {
+    const userId = getUserId(req);
+    llm.setActiveProvider(userId, req.params.name);
+    res.json({ ok: true });
+  });
+
   app.put('/api/providers/:name/key', (req, res) => {
     const userId = getUserId(req);
     llm.setApiKey(userId, req.params.name, req.body.apiKey);
@@ -134,6 +144,64 @@ export function createDashboard(port = 9999) {
     const userId = getUserId(req);
     llm.setModel(userId, req.params.name, req.body.model);
     res.json({ ok: true });
+  });
+
+  // Fetch live models from a running provider (Ollama, LM Studio, OpenRouter)
+  app.get('/api/providers/:name/models', async (req, res) => {
+    try {
+      const userId = getUserId(req);
+      const provName = req.params.name;
+      const row = db.prepare('SELECT * FROM providers WHERE user_id = ? AND name = ?').get(userId, provName);
+      if (!row) return res.status(404).json({ error: 'Provider not found' });
+
+      let models = [];
+
+      if (provName === 'ollama') {
+        const baseUrl = row.base_url || 'http://localhost:11434';
+        const resp = await fetch(`${baseUrl}/api/tags`, { signal: AbortSignal.timeout(5000) });
+        if (resp.ok) {
+          const data = await resp.json();
+          models = (data.models || []).map(m => ({
+            id: m.name, name: m.name,
+            size: m.size ? `${(m.size / 1e9).toFixed(1)}GB` : null,
+            modified: m.modified_at,
+          }));
+        }
+      } else if (provName === 'ollama-cloud') {
+        const baseUrl = row.base_url || 'https://ollama.com';
+        const headers = { 'Content-Type': 'application/json' };
+        if (row.api_key) headers['Authorization'] = `Bearer ${row.api_key}`;
+        const resp = await fetch(`${baseUrl}/api/tags`, { headers, signal: AbortSignal.timeout(8000) });
+        if (resp.ok) {
+          const data = await resp.json();
+          models = (data.models || []).map(m => ({
+            id: m.name, name: m.name,
+            size: m.size ? `${(m.size / 1e9).toFixed(1)}GB` : null,
+          }));
+        }
+      } else if (provName === 'lmstudio') {
+        const baseUrl = row.base_url || 'http://127.0.0.1:1234';
+        const resp = await fetch(`${baseUrl}/v1/models`, { signal: AbortSignal.timeout(5000) });
+        if (resp.ok) {
+          const data = await resp.json();
+          models = (data.data || []).map(m => ({ id: m.id, name: m.id }));
+        }
+      } else if (provName === 'openrouter') {
+        const resp = await fetch('https://openrouter.ai/api/v1/models', { signal: AbortSignal.timeout(8000) });
+        if (resp.ok) {
+          const data = await resp.json();
+          const free = (data.data || []).filter(m =>
+            m.id.includes(':free') || m.id === 'openrouter/free' || m.id === 'openrouter/auto' ||
+            (m.pricing && m.pricing.prompt === '0' && m.pricing.completion === '0')
+          );
+          models = free.map(m => ({ id: m.id, name: m.name || m.id }));
+        }
+      }
+
+      res.json({ models, provider: provName });
+    } catch (err) {
+      res.json({ models: [], error: err.message, provider: req.params.name });
+    }
   });
 
   // Test provider connection and latency
@@ -1263,6 +1331,362 @@ CRITICAL RULES:
     }
     projectManager.delete(id);
     res.json({ ok: true });
+  });
+
+  // ==================== GIT REPOS ====================
+
+  app.get('/api/git-repos', (req, res) => {
+    const list = gitRepoManager.listAll();
+    // Attach running status
+    for (const r of list) {
+      const name = `git-${r.id}`;
+      r._running = runningProjects.has(name);
+      r._port = runningProjects.get(name)?.port;
+    }
+    res.json(list);
+  });
+
+  app.get('/api/git-repos/:id', (req, res) => {
+    const repo = gitRepoManager.get(parseInt(req.params.id));
+    if (!repo) return res.status(404).json({ error: 'Not found' });
+    const name = `git-${repo.id}`;
+    repo._running = runningProjects.has(name);
+    repo._port = runningProjects.get(name)?.port;
+    res.json(repo);
+  });
+
+  app.post('/api/git-repos/clone', async (req, res) => {
+    const { url } = req.body;
+    if (!url) return res.status(400).json({ error: 'URL required' });
+    const userId = getUserId(req);
+
+    // Check duplicate
+    const existing = gitRepoManager.findByUrl(userId, url);
+    if (existing) return res.json({ status: 'exists', repo: existing });
+
+    res.json({ status: 'cloning' });
+
+    // Background clone
+    (async () => {
+      try {
+        let cloneUrl = url.trim();
+        if (cloneUrl.includes('github.com') && !cloneUrl.endsWith('.git')) {
+          cloneUrl = cloneUrl.replace(/\/$/, '');
+        }
+        const repoName = cloneUrl.match(/\/([^/]+?)(?:\.git)?$/)?.[1] || 'repo';
+        const reposDir = join(__dirname, '..', 'repos');
+        await fsMkdir(reposDir, { recursive: true });
+        const repoDir = join(reposDir, repoName);
+
+        const safeUrl = cloneUrl.replace(/[;&|`$"]/g, '');
+
+        // Clone
+        try {
+          await new Promise((resolve, reject) => {
+            const proc = spawn(`git clone "${safeUrl}" "${repoDir}"`, { shell: true, cwd: reposDir });
+            proc.on('close', code => code === 0 ? resolve() : reject(new Error(`git clone exit ${code}`)));
+            setTimeout(() => { try { proc.kill(); } catch {} reject(new Error('Clone timed out')); }, 120000);
+          });
+        } catch (err) {
+          if (!err.message.includes('already exists')) {
+            console.log('[git-repos] clone error:', err.message);
+            return;
+          }
+        }
+
+        // Deep-analyze repo: reads README, package.json, Makefile, etc. + LLM
+        llm.initDefaults(userId);
+        const analysis = await analyzeRepo(repoDir, repoName, llm, userId);
+        const { projectType, installCmd, runCmd, skills, readmeSummary } = analysis;
+
+        // Install deps
+        if (installCmd) {
+          try {
+            await new Promise((resolve, reject) => {
+              const proc = spawn(installCmd, { cwd: repoDir, shell: true });
+              proc.on('close', code => code === 0 ? resolve() : reject(new Error(`Install exit ${code}`)));
+              setTimeout(() => { try { proc.kill(); } catch {} reject(new Error('Install timed out')); }, 120000);
+            });
+          } catch {}
+        }
+
+        gitRepoManager.create(userId, url, repoName, repoDir, projectType, installCmd, runCmd, skills, readmeSummary);
+      } catch (err) {
+        console.log('[git-repos] clone error:', err.message);
+      }
+    })();
+  });
+
+  // Run a git repo — LLM-driven: ask LLM for step-by-step setup + run plan
+  app.post('/api/git-repos/:id/run', (req, res) => {
+    const repo = gitRepoManager.get(parseInt(req.params.id));
+    if (!repo) return res.status(404).json({ error: 'Not found' });
+    if (!existsSync(repo.clone_dir)) return res.status(400).json({ error: 'Clone dir missing' });
+
+    const name = `git-${repo.id}`;
+    if (runningProjects.has(name)) {
+      return res.json({ status: 'already_running', port: runningProjects.get(name).port });
+    }
+
+    const port = freedPorts.pop() || nextProjectPort++;
+    if (!persistedLogs.has(name)) persistedLogs.set(name, []);
+    const allLogs = persistedLogs.get(name);
+    if (allLogs.length > 0) {
+      allLogs.push(`\n${'━'.repeat(50)}\n`);
+      allLogs.push(`▶️  New run — ${new Date().toLocaleTimeString()}\n`);
+      allLogs.push(`${'━'.repeat(50)}\n\n`);
+    }
+    allLogs.push('🧠 Asking LLM how to run this repo...\n');
+    if (allLogs.length > 500) allLogs.splice(0, allLogs.length - 300);
+    const logs = allLogs;
+    runningProjects.set(name, { process: null, port, logs, projectDir: repo.clone_dir, phase: 'planning' });
+    gitRepoManager.update(repo.id, { status: 'running' });
+    res.json({ status: 'planning', port, name });
+
+    // Helper: run a shell command and stream output to logs
+    // Auto-answers Y/N prompts by writing "Y\n" to stdin and closing it
+    const runStep = (cmd, cwd, timeout = 120000) => new Promise((resolve) => {
+      logs.push(`> ${cmd}\n`);
+      const proc = spawn(cmd, { cwd, shell: true, env: { ...process.env, PORT: String(port) }, stdio: ['pipe', 'pipe', 'pipe'] });
+      let stdout = '', stderr = '';
+      // Auto-answer any Y/N prompts
+      try { proc.stdin.write('Y\n'); proc.stdin.end(); } catch {}
+      proc.stdout?.on('data', d => { const s = d.toString(); stdout += s; logs.push(s); if (logs.length > 300) logs.shift(); });
+      proc.stderr?.on('data', d => { const s = d.toString(); stderr += s; logs.push(s); if (logs.length > 300) logs.shift(); });
+      proc.on('close', code => resolve({ ok: code === 0, stdout, stderr, code }));
+      setTimeout(() => { try { proc.kill(); } catch {} resolve({ ok: false, stdout, stderr: stderr + '\nTimed out', code: -1 }); }, timeout);
+    });
+
+    // Background: LLM-driven execution
+    (async () => {
+      const userId = getUserId(req);
+      // Step 1: Ask LLM for a run plan
+      let plan;
+      try {
+        llm.initDefaults(userId);
+        plan = await generateRunPlan(repo.clone_dir, repo.name, repo.project_type, llm, userId);
+      } catch (err) {
+        logs.push(`\n❌ LLM couldn't generate a run plan: ${err.message}\n`);
+        const entry = runningProjects.get(name);
+        if (entry) entry.phase = 'stopped';
+        persistedLogs.set(name, [...logs]);
+        setTimeout(() => { runningProjects.delete(name); freedPorts.push(port); gitRepoManager.update(repo.id, { status: 'error' }); }, 3000);
+        return;
+      }
+
+      if (!plan.steps || plan.steps.length === 0) {
+        logs.push('\n❌ LLM returned no steps.\n');
+        const entry = runningProjects.get(name);
+        if (entry) entry.phase = 'stopped';
+        persistedLogs.set(name, [...logs]);
+        setTimeout(() => { runningProjects.delete(name); freedPorts.push(port); gitRepoManager.update(repo.id, { status: 'error' }); }, 3000);
+        return;
+      }
+
+      // Show the plan
+      logs.push(`\n📋 Run plan (${plan.steps.length} steps):\n`);
+      plan.steps.forEach((s, i) => logs.push(`  ${i + 1}. ${s.label}: ${s.cmd}\n`));
+      logs.push('\n');
+
+      const entry = runningProjects.get(name);
+      if (entry) entry.phase = 'installing';
+
+      // Step 2: Execute each step
+      let allOk = true;
+      for (let i = 0; i < plan.steps.length; i++) {
+        const step = plan.steps[i];
+        const isLastStep = i === plan.steps.length - 1;
+        logs.push(`\n⚡ Step ${i + 1}/${plan.steps.length}: ${step.label}\n`);
+
+        let fixAttempts = 0;
+        let currentCmd = step.cmd;
+        let succeeded = false;
+        const prevAttempts = [];
+
+        while (true) {
+          if (isLastStep && entry) entry.phase = 'running';
+          const timeout = isLastStep ? 30000 : 120000;
+          const result = await runStep(currentCmd, repo.clone_dir, timeout);
+
+          if (result.ok) {
+            logs.push('✅ Done\n');
+            succeeded = true;
+            break;
+          }
+
+          // Step failed — ask LLM to fix
+          const errOutput = (result.stderr || result.stdout || 'Unknown error').substring(0, 2000);
+          fixAttempts++;
+
+          logs.push(`\n⚠️ Step failed (attempt ${fixAttempts}). Asking LLM to fix...\n`);
+          try {
+            llm.initDefaults(userId);
+            prevAttempts.push(`Attempt ${fixAttempts}: "${currentCmd}" → ${errOutput.substring(0, 300)}`);
+            const fix = await diagnoseStepFailure(repo.clone_dir, repo.name, repo.project_type, step, errOutput, prevAttempts, llm, userId);
+            logs.push(`🔧 ${fix.diagnosis || 'Fixing...'}\n`);
+
+            for (const fc of (fix.fix_commands || [])) {
+              await runStep(fc, repo.clone_dir, 60000);
+            }
+
+            if (fix.retry_cmd && fix.retry_cmd !== 'null') {
+              currentCmd = fix.retry_cmd;
+              logs.push(`🔧 Retrying with: ${currentCmd}\n`);
+            }
+          } catch (fixErr) {
+            logs.push(`❌ LLM fix error: ${fixErr.message}\n`);
+          }
+        }
+
+        if (!succeeded) {
+          allOk = false;
+          break;
+        }
+      }
+
+      // Save run/install commands from the plan
+      if (plan.run_cmd) gitRepoManager.update(repo.id, { run_cmd: plan.run_cmd });
+      if (plan.install_cmd) gitRepoManager.update(repo.id, { install_cmd: plan.install_cmd });
+
+      if (allOk) {
+        logs.push('\n✅ All steps completed successfully!\n');
+      }
+
+      persistedLogs.set(name, [...logs]);
+      if (entry) entry.phase = 'stopped';
+      setTimeout(() => {
+        runningProjects.delete(name);
+        freedPorts.push(port);
+        gitRepoManager.update(repo.id, { status: allOk ? 'cloned' : 'error' });
+      }, 5000);
+    })();
+  });
+
+  // Re-analyze a git repo (re-detect run/install commands without re-cloning)
+  app.post('/api/git-repos/:id/reanalyze', async (req, res) => {
+    const repo = gitRepoManager.get(parseInt(req.params.id));
+    if (!repo) return res.status(404).json({ error: 'Not found' });
+    if (!existsSync(repo.clone_dir)) return res.status(400).json({ error: 'Clone dir missing' });
+
+    try {
+      const userId = getUserId(req);
+      llm.initDefaults(userId);
+      const analysis = await analyzeRepo(repo.clone_dir, repo.name, llm, userId);
+      gitRepoManager.update(repo.id, {
+        project_type: analysis.projectType,
+        install_cmd: analysis.installCmd,
+        run_cmd: analysis.runCmd,
+        skills: analysis.skills,
+        readme_summary: analysis.readmeSummary,
+      });
+      res.json({ ok: true, ...analysis });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Stop a git repo
+  app.post('/api/git-repos/:id/stop', (req, res) => {
+    const repo = gitRepoManager.get(parseInt(req.params.id));
+    if (!repo) return res.status(404).json({ error: 'Not found' });
+    const name = `git-${repo.id}`;
+    const running = runningProjects.get(name);
+    if (running) {
+      if (running.logs?.length) {
+        running.logs.push('\n⏹ Stopped by user\n');
+        persistedLogs.set(name, [...running.logs]);
+      }
+      try { if (running.process) running.process.kill(); } catch {}
+      runningProjects.delete(name);
+      freedPorts.push(running.port);
+    }
+    gitRepoManager.update(repo.id, { status: 'cloned' });
+    res.json({ ok: true });
+  });
+
+  // Get git repo logs
+  app.get('/api/git-repos/:id/logs', (req, res) => {
+    const repo = gitRepoManager.get(parseInt(req.params.id));
+    if (!repo) return res.status(404).json({ error: 'Not found' });
+    const name = `git-${repo.id}`;
+    const running = runningProjects.get(name);
+    const saved = persistedLogs.get(name);
+    res.json({
+      running: !!running,
+      port: running?.port,
+      phase: running?.phase,
+      logs: running?.logs?.join('') || saved?.join('') || ''
+    });
+  });
+
+  // Delete git repo
+  app.delete('/api/git-repos/:id', (req, res) => {
+    const id = parseInt(req.params.id);
+    const repo = gitRepoManager.get(id);
+    if (repo) {
+      const name = `git-${id}`;
+      if (runningProjects.has(name)) {
+        try { runningProjects.get(name).process.kill(); } catch {}
+        runningProjects.delete(name);
+      }
+      persistedLogs.delete(name);
+    }
+    gitRepoManager.delete(id);
+    res.json({ ok: true });
+  });
+
+  // Git pull
+  app.post('/api/git-repos/:id/pull', async (req, res) => {
+    const repo = gitRepoManager.get(parseInt(req.params.id));
+    if (!repo) return res.status(404).json({ error: 'Not found' });
+    try {
+      const result = await new Promise((resolve) => {
+        let stdout = '', stderr = '';
+        const proc = spawn('git pull', { cwd: repo.clone_dir, shell: true });
+        proc.stdout?.on('data', d => { stdout += d; });
+        proc.stderr?.on('data', d => { stderr += d; });
+        proc.on('close', code => resolve({ ok: code === 0, stdout, stderr }));
+        setTimeout(() => { try { proc.kill(); } catch {} resolve({ ok: false, stderr: 'Timed out' }); }, 60000);
+      });
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Open terminal for git repo
+  app.post('/api/git-repos/:id/open-terminal', (req, res) => {
+    const repo = gitRepoManager.get(parseInt(req.params.id));
+    if (!repo?.clone_dir) return res.status(400).json({ error: 'No clone dir' });
+    try {
+      if (isWindows) {
+        const safeTitle = repo.name.replace(/[&|<>^"]/g, '');
+        const cmd = repo.run_cmd || 'echo Ready';
+        execCb(`start "${safeTitle}" cmd.exe /k "cd /d ${repo.clone_dir} && ${cmd}"`,
+          { cwd: repo.clone_dir, windowsHide: false },
+          (err) => { if (err) console.log('[git-terminal] error:', err.message); });
+      } else if (process.platform === 'darwin') {
+        execCb(`open -a Terminal "${repo.clone_dir}"`);
+      } else {
+        execCb(`x-terminal-emulator -e "cd '${repo.clone_dir}' && bash"`, { cwd: repo.clone_dir });
+      }
+      res.json({ ok: true });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Open folder for git repo
+  app.post('/api/git-repos/:id/open-folder', (req, res) => {
+    const repo = gitRepoManager.get(parseInt(req.params.id));
+    if (!repo?.clone_dir) return res.status(400).json({ error: 'No clone dir' });
+    try {
+      const openCmd = isWindows ? 'explorer' : process.platform === 'darwin' ? 'open' : 'xdg-open';
+      spawn(openCmd, [repo.clone_dir], { detached: true, shell: true }).unref();
+      res.json({ ok: true });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
   });
 
   // ==================== WORKFLOWS ====================

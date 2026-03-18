@@ -17,7 +17,8 @@ const PROVIDER_DEFAULTS = [
   { name: 'fireworks', envKey: 'FIREWORKS_API_KEY', model: 'accounts/fireworks/models/llama-v3p3-70b-instruct', priority: 11 },
   { name: 'cerebras', envKey: 'CEREBRAS_API_KEY', model: 'llama-3.3-70b', priority: 12 },
   { name: 'ollama', envKey: null, model: 'llama3.2', priority: 13, isLocal: true },
-  { name: 'lmstudio', envKey: null, model: 'default', priority: 14, isLocal: true },
+  { name: 'ollama-cloud', envKey: 'OLLAMA_CLOUD_API_KEY', model: 'deepseek-v3.1:671b-cloud', priority: 14 },
+  { name: 'lmstudio', envKey: null, model: 'default', priority: 15, isLocal: true },
 ];
 
 // Providers that support vision input
@@ -83,9 +84,10 @@ class LLMManager {
   }
 
   _getDefaultBaseUrl(d) {
+    if (d.name === 'ollama-cloud') return 'https://ollama.com';
     if (!d.isLocal) return '';
     if (d.name === 'ollama') return process.env.OLLAMA_BASE_URL || 'http://localhost:11434';
-    if (d.name === 'lmstudio') return process.env.LMSTUDIO_BASE_URL || 'http://localhost:1234';
+    if (d.name === 'lmstudio') return process.env.LMSTUDIO_BASE_URL || 'http://127.0.0.1:1234';
     return '';
   }
 
@@ -203,6 +205,26 @@ class LLMManager {
   toggleProvider(userId, name) {
     db.prepare('UPDATE providers SET enabled = CASE WHEN enabled = 1 THEN 0 ELSE 1 END WHERE user_id = ? AND name = ?').run(userId, name);
     this.clearCache(userId, name);
+  }
+
+  // Move a provider to top priority (make it the active/first one tried)
+  setActiveProvider(userId, name) {
+    const providers = this.getProviders(userId);
+    const target = providers.find(p => p.name === name);
+    if (!target) return;
+    const tx = db.transaction(() => {
+      // Shift all providers that were above the target down by 1
+      for (const p of providers) {
+        if (p.priority < target.priority) {
+          db.prepare('UPDATE providers SET priority = ? WHERE user_id = ? AND name = ?')
+            .run(p.priority + 1, userId, p.name);
+        }
+      }
+      // Set target to priority 1 (top)
+      db.prepare('UPDATE providers SET priority = 1 WHERE user_id = ? AND name = ?')
+        .run(userId, name);
+    });
+    tx();
   }
 
   reorderProvider(userId, name, direction) {

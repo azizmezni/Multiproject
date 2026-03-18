@@ -126,6 +126,9 @@ export function registerProviders(bot, shared) {
     await ctx.editMessageText(`Select model for ${PROVIDER_REGISTRY[ctx.match[1]].name}:`, keyboard);
   });
 
+  // Noop for group header buttons
+  bot.action('noop', async (ctx) => { await ctx.answerCbQuery(); });
+
   bot.action(/select_model:(.+):(.+)/, async (ctx) => {
     await ctx.answerCbQuery('Model updated');
     const [, providerName, model] = ctx.match;

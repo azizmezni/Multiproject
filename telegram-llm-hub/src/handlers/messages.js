@@ -153,21 +153,17 @@ export function registerMessages(bot, shared) {
       return ctx.reply(`\u2705 ${field} updated: ${values.join(', ')}`);
     }
 
-    // Handle social media chat (discuss a post with AI)
-    if (state.awaiting_input?.startsWith('social_chat:')) {
-      const draftId = parseInt(state.awaiting_input.split(':')[1]);
+    // Handle git repo clone URL
+    if (state.awaiting_input === 'git_clone_url') {
       userState.clearAwaiting(userId);
-      const draft = drafts.get(draftId);
-      if (!draft) return ctx.reply('Draft not found.');
-      const postContent = (draft.content || draft.description || '').substring(0, 3000);
-      try {
-        const result = await llm.chat(userId, [
-          { role: 'system', content: `You are discussing a social media post with the user. Here is the post content:\n\nURL: ${draft.url}\nTitle: ${draft.title}\n\n${postContent}\n\nAnswer the user's question about this post. Be helpful and insightful.` },
-          { role: 'user', content: text },
-        ]);
-        await safeSend(ctx, `💬 ${result.text.substring(0, 3500)}\n\n_via ${result.provider}_`);
-      } catch (err) {
-        await ctx.reply(`❌ ${err.message}`);
+      const url = text.trim();
+      if (!url.match(/^https?:\/\/.+/)) {
+        return ctx.reply('❌ Please send a valid Git repository URL (https://...)');
+      }
+      if (shared.handleGitClone) {
+        await shared.handleGitClone(ctx, userId, url);
+      } else {
+        await ctx.reply('Git repos feature not available.');
       }
       return;
     }
@@ -229,7 +225,7 @@ Help the user refine this project. You can suggest adding/removing/modifying key
       return;
     }
 
-    // Check if message contains a URL -> smart link handling
+    // Check if message contains a URL -> smart link handling (project-focused)
     const url = extractUrl(text);
     if (url && !text.startsWith('/')) {
       const linkType = detectLinkType(url);
@@ -239,78 +235,73 @@ Help the user refine this project. You can suggest adding/removing/modifying key
         npm: '📦 npm Package', pypi: '📦 PyPI Package', docs: '📖 Documentation',
         article: '📰 Article', stackoverflow: '💡 StackOverflow', api: '🌐 API',
         docker: '🐳 Docker Image', website: '🔗 Website',
-        twitter: '🐦 Twitter/X Post', reddit: '🤖 Reddit Post', instagram: '📷 Instagram',
-        facebook: '👤 Facebook Post', linkedin: '💼 LinkedIn Post', tiktok: '🎵 TikTok',
+        twitter: '🐦 Twitter/X', reddit: '🤖 Reddit', instagram: '📷 Instagram',
+        facebook: '👤 Facebook', linkedin: '💼 LinkedIn', tiktok: '🎵 TikTok',
         threads: '🧵 Threads', mastodon: '🐘 Mastodon',
       };
       const typeLabel = typeLabels[linkType] || '🔗 Link';
       const SOCIAL_TYPES = ['twitter', 'reddit', 'instagram', 'facebook', 'linkedin', 'tiktok', 'threads', 'mastodon'];
 
-      // Social media: fetch post content and show it immediately
-      if (SOCIAL_TYPES.includes(linkType)) {
-        await ctx.reply(`${typeLabel} detected! Reading post content...`);
-        const social = await fetchSocialContent(url, linkType);
-        const meta = await fetchLinkMeta(url);
+      await ctx.reply(`${typeLabel} detected! Analyzing...`);
 
-        // Build rich content string for storage and display
-        let contentText = '';
+      // Fetch content — use social API for social links, regular meta for others
+      let meta = await fetchLinkMeta(url);
+      let contentText = meta.bodyText || '';
+      let title = meta.title;
+      let description = meta.description;
+
+      if (SOCIAL_TYPES.includes(linkType)) {
+        const social = await fetchSocialContent(url, linkType);
         if (social) {
-          contentText += social.author ? `Author: ${social.author}` : '';
-          contentText += social.handle ? ` (${social.handle})` : '';
-          contentText += social.subreddit ? ` in ${social.subreddit}` : '';
-          contentText += '\n';
-          if (social.title) contentText += `Title: ${social.title}\n`;
-          if (social.date) contentText += `Date: ${social.date}\n`;
-          contentText += '\n';
-          contentText += social.text || '';
+          // Build rich content from social API
+          let socialText = '';
+          if (social.author) socialText += `Author: ${social.author}`;
+          if (social.handle) socialText += ` (${social.handle})`;
+          if (social.subreddit) socialText += ` in ${social.subreddit}`;
+          socialText += '\n';
+          if (social.title) socialText += `Title: ${social.title}\n`;
+          socialText += '\n' + (social.text || '');
           if (social.topComments?.length > 0) {
-            contentText += '\n\n--- Top Comments ---\n';
+            socialText += '\n\n--- Top Comments ---\n';
             for (const c of social.topComments) {
-              contentText += `u/${c.author} (${c.score} pts): ${c.text?.substring(0, 300)}\n\n`;
+              socialText += `u/${c.author} (${c.score} pts): ${c.text?.substring(0, 300)}\n\n`;
             }
           }
+          contentText = socialText || contentText;
+          title = social.title || title;
+          description = social.text?.substring(0, 500) || description;
         }
-
-        const draft = drafts.add(userId, url, social?.title || meta.title, social?.text?.substring(0, 500) || meta.description, contentText || meta.bodyText || '');
-
-        // Build display message
-        let msg = `📱 *${typeLabel}*\n\n`;
-        if (social) {
-          if (social.author) msg += `👤 *${stripMd(social.author)}*`;
-          if (social.handle) msg += ` (${stripMd(social.handle)})`;
-          if (social.subreddit) msg += ` in *${stripMd(social.subreddit)}*`;
-          msg += '\n';
-          if (social.title) msg += `\n📌 *${stripMd(social.title)}*\n`;
-          if (social.text) {
-            const preview = social.text.substring(0, 800);
-            msg += `\n${stripMd(preview)}${social.text.length > 800 ? '...' : ''}\n`;
-          }
-          if (social.score) msg += `\n⬆️ ${social.score} points`;
-          if (social.comments) msg += ` · 💬 ${social.comments} comments`;
-          if (social.likes) msg += `\n❤️ ${social.likes}`;
-          if (social.retweets) msg += ` · 🔁 ${social.retweets}`;
-          if (social.replies) msg += ` · 💬 ${social.replies}`;
-          msg += '\n';
-        } else {
-          // Fallback to meta tags
-          if (meta.title && meta.title !== url) msg += `*${stripMd(meta.title)}*\n`;
-          if (meta.description) msg += `${stripMd(meta.description).substring(0, 400)}\n`;
-          if (!meta.title && !meta.description) msg += `_Could not read post content (may be private)_\n`;
-        }
-
-        msg += `\n_Saved to drafts._ Pick an action:`;
-        return safeSend(ctx, msg, kb.draftActions(draft.id, linkType));
       }
 
-      // Non-social links: existing behavior
-      await ctx.reply(`${typeLabel} detected! Fetching info...`);
-      const meta = await fetchLinkMeta(url);
-      const draft = drafts.add(userId, url, meta.title, meta.description, meta.bodyText || '');
-      let contextMsg = `📥 *Saved to Drafts*\n\n*${stripMd(meta.title || url)}*\n`;
-      if (meta.description) contextMsg += `${stripMd(meta.description).substring(0, 200)}\n`;
-      contextMsg += `\nType: ${typeLabel}\n`;
+      const draft = drafts.add(userId, url, title, description, contentText);
+
+      // Use LLM to understand WHY the user shared this link
+      let intentMsg = '';
+      try {
+        llm.initDefaults(userId);
+        const intentResult = await llm.chat(userId, [
+          {
+            role: 'system',
+            content: `The user shared a link in a dev-focused bot. They share links because they want to BUILD something from it. Analyze and respond in 2-4 SHORT lines:
+1. What is this? (1 sentence)
+2. What project/tool could be built from this? (1-2 sentences)
+
+Be specific and actionable. No markdown headers. Keep it under 200 chars total.`
+          },
+          { role: 'user', content: `URL: ${url}\nType: ${linkType}\nTitle: ${title}\nDescription: ${description || 'N/A'}\n\nContent:\n${contentText.substring(0, 2000)}` }
+        ]);
+        intentMsg = intentResult.text.substring(0, 400);
+      } catch {
+        intentMsg = '';
+      }
+
+      // Build display message
+      let contextMsg = `📥 *${typeLabel}*\n\n`;
+      contextMsg += `*${stripMd(title || url)}*\n`;
+      if (description && description !== title) contextMsg += `${stripMd(description).substring(0, 200)}\n`;
       if (linkType === 'github_repo' && meta.extra?.language) contextMsg += `Language: ${meta.extra.language}\n`;
-      contextMsg += `\nI detected this as a *${typeLabel}*. Pick a smart action:`;
+      if (intentMsg) contextMsg += `\n💡 ${stripMd(intentMsg)}\n`;
+      contextMsg += `\n_Saved to drafts._ What do you want to do?`;
       return safeSend(ctx, contextMsg, kb.draftActions(draft.id, linkType));
     }
 

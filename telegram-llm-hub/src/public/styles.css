@@ -64,6 +64,41 @@ body {
 .logo-icon { font-size: 28px; animation: pulse 2s infinite; }
 @keyframes pulse { 0%,100%{ transform: scale(1); } 50%{ transform: scale(1.15); } }
 .logo-text { font-size: 22px; font-weight: 700; background: linear-gradient(135deg, var(--cyan), var(--purple)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+
+/* Active Provider Widget */
+.active-provider-widget { display: flex; align-items: center; gap: 6px; margin-left: 4px; }
+.apw-label { font-size: 11px; color: var(--text2); text-transform: uppercase; letter-spacing: 0.5px; }
+.apw-dropdown { position: relative; }
+.apw-current {
+  display: flex; align-items: center; gap: 5px;
+  background: var(--bg3); border: 1px solid var(--border); border-radius: 6px;
+  padding: 3px 10px; cursor: pointer; color: var(--cyan);
+  font-size: 13px; font-weight: 600; font-family: inherit;
+  transition: border-color 0.2s, background 0.2s;
+}
+.apw-current:hover { border-color: var(--cyan); background: var(--bg2); }
+.apw-arrow { font-size: 10px; color: var(--text2); transition: transform 0.2s; }
+.apw-dropdown.open .apw-arrow { transform: rotate(180deg); }
+.apw-menu {
+  display: none; position: absolute; top: calc(100% + 4px); left: 0; min-width: 200px;
+  background: var(--bg2); border: 1px solid var(--border); border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.4); z-index: 100; padding: 4px;
+  max-height: 300px; overflow-y: auto;
+}
+.apw-dropdown.open .apw-menu { display: block; }
+.apw-item {
+  display: flex; align-items: center; gap: 8px; padding: 7px 10px;
+  border-radius: 5px; cursor: pointer; font-size: 13px; color: var(--text1);
+  transition: background 0.15s;
+}
+.apw-item:hover { background: var(--bg3); }
+.apw-item.active { color: var(--cyan); font-weight: 600; }
+.apw-item .apw-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.apw-item .apw-dot.on { background: var(--green); }
+.apw-item .apw-dot.off { background: var(--text2); opacity: 0.4; }
+.apw-item .apw-dot.nokey { background: var(--yellow); }
+.apw-item-model { font-size: 10px; color: var(--text2); margin-left: auto; }
+
 .stats-bar { display: flex; align-items: center; gap: 20px; }
 .stat-item { display: flex; align-items: center; gap: 6px; }
 .stat-label { font-size: 12px; color: var(--text2); text-transform: uppercase; }

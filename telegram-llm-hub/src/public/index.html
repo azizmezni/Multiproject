@@ -28,6 +28,16 @@
     <div class="logo">
       <span class="logo-icon">⚡</span>
       <span class="logo-text">LLM Hub</span>
+      <div class="active-provider-widget" id="active-provider-widget">
+        <span class="apw-label">using</span>
+        <div class="apw-dropdown" id="apw-dropdown">
+          <button class="apw-current" id="apw-current" onclick="toggleProviderDropdown()">
+            <span id="apw-name">—</span>
+            <span class="apw-arrow">▾</span>
+          </button>
+          <div class="apw-menu" id="apw-menu"></div>
+        </div>
+      </div>
     </div>
     <div class="search-bar">
       <input class="input search-input" id="global-search" placeholder="🔍 Search boards, workflows, drafts..."
@@ -72,6 +82,9 @@
       </button>
       <button class="nav-btn" data-section="drafts" onclick="showSection('drafts')">
         <span class="nav-icon">📥</span><span class="nav-label">Drafts</span>
+      </button>
+      <button class="nav-btn" data-section="gitrepos" onclick="showSection('gitrepos')">
+        <span class="nav-icon">📚</span><span class="nav-label">Git Repos</span>
       </button>
       <button class="nav-btn" data-section="projects" onclick="showSection('projects')">
         <span class="nav-icon">🚀</span><span class="nav-label">Projects</span>

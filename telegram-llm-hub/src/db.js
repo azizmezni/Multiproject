@@ -352,6 +352,23 @@ db.exec(`
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
   CREATE INDEX IF NOT EXISTS idx_selfimprove_user ON self_improvements(user_id);
+
+  -- Git Repos (cloned repositories with skills)
+  CREATE TABLE IF NOT EXISTS git_repos (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    url TEXT NOT NULL,
+    name TEXT NOT NULL,
+    clone_dir TEXT NOT NULL,
+    project_type TEXT DEFAULT 'unknown',
+    install_cmd TEXT DEFAULT '',
+    run_cmd TEXT DEFAULT '',
+    skills TEXT DEFAULT '[]',
+    readme_summary TEXT DEFAULT '',
+    status TEXT DEFAULT 'cloned',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+  CREATE INDEX IF NOT EXISTS idx_gitrepos_user ON git_repos(user_id);
 `);
 
 export default db;

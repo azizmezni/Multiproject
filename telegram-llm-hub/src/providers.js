@@ -300,7 +300,7 @@ export class GrokProvider extends OpenAICompatibleProvider {
 
 // --- OpenRouter (OpenAI-compatible, meta-provider) ---
 export class OpenRouterProvider extends OpenAICompatibleProvider {
-  constructor(apiKey, model = 'anthropic/claude-sonnet-4-20250514') {
+  constructor(apiKey, model = 'openrouter/free') {
     super('openrouter', 'OpenRouter', apiKey, model, 'https://openrouter.ai/api', {
       extraHeaders: { 'HTTP-Referer': 'https://telegram-llm-hub.local', 'X-Title': 'Telegram LLM Hub' },
     });
@@ -338,17 +338,23 @@ export class CerebrasProvider extends OpenAICompatibleProvider {
   }
 }
 
-// --- Ollama (Local) ---
+// --- Ollama (Local + Cloud) ---
 export class OllamaProvider extends BaseProvider {
-  constructor(baseUrl = 'http://localhost:11434', model = 'llama3.1') {
-    super('ollama', 'Ollama (Local)', null, model, baseUrl);
-    this.isLocal = true;
+  constructor(baseUrl = 'http://localhost:11434', model = 'llama3.1', apiKey = null) {
+    super('ollama', 'Ollama', apiKey, model, baseUrl);
+    this.isLocal = !apiKey;
+  }
+
+  _headers() {
+    const h = { 'Content-Type': 'application/json' };
+    if (this.apiKey) h['Authorization'] = `Bearer ${this.apiKey}`;
+    return h;
   }
 
   async chat(messages, opts = {}) {
     const res = await fetch(`${this.baseUrl}/api/chat`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: this._headers(),
       body: JSON.stringify({
         model: this.model,
         messages,
@@ -368,8 +374,8 @@ export class OllamaProvider extends BaseProvider {
   async test() {
     const start = Date.now();
     try {
-      const res = await fetch(`${this.baseUrl}/api/tags`);
-      if (!res.ok) throw new Error('Ollama not running');
+      const res = await fetch(`${this.baseUrl}/api/tags`, { headers: this._headers() });
+      if (!res.ok) throw new Error(`Ollama ${this.apiKey ? 'Cloud' : 'Local'} error ${res.status}`);
       const data = await res.json();
       return { ok: true, models: data.models?.map(m => m.name) || [], latency: Date.now() - start };
     } catch (e) {
@@ -476,10 +482,58 @@ export const PROVIDER_REGISTRY = {
     class: OpenRouterProvider,
     name: 'OpenRouter',
     envKey: 'OPENROUTER_API_KEY',
-    models: ['anthropic/claude-sonnet-4-20250514', 'openai/gpt-4o', 'google/gemini-2.5-flash', 'meta-llama/llama-3.3-70b-instruct', 'deepseek/deepseek-r1'],
+    modelGroups: {
+      '🆓 Free (no key needed)': [
+        'openrouter/free',
+        'openrouter/auto',
+        'qwen/qwen3-coder:free',
+        'openai/gpt-oss-120b:free',
+        'openai/gpt-oss-20b:free',
+        'nvidia/nemotron-3-super-120b-a12b:free',
+        'minimax/minimax-m2.5:free',
+        'meta-llama/llama-3.3-70b-instruct:free',
+        'nousresearch/hermes-3-llama-3.1-405b:free',
+        'google/gemma-3-27b-it:free',
+        'google/gemma-3-12b-it:free',
+        'mistralai/mistral-small-3.1-24b-instruct:free',
+        'qwen/qwen3-4b:free',
+        'qwen/qwen3-next-80b-a3b-instruct:free',
+        'stepfun/step-3.5-flash:free',
+        'arcee-ai/trinity-large-preview:free',
+        'arcee-ai/trinity-mini:free',
+        'nvidia/nemotron-nano-9b-v2:free',
+        'nvidia/nemotron-nano-12b-v2-vl:free',
+        'nvidia/nemotron-3-nano-30b-a3b:free',
+        'z-ai/glm-4.5-air:free',
+        'cognitivecomputations/dolphin-mistral-24b-venice-edition:free',
+        'google/gemma-3n-e4b-it:free',
+        'google/gemma-3n-e2b-it:free',
+        'liquid/lfm-2.5-1.2b-thinking:free',
+        'liquid/lfm-2.5-1.2b-instruct:free',
+      ],
+      '💎 Premium (key required)': [
+        'anthropic/claude-sonnet-4-20250514',
+        'openai/gpt-4o',
+        'google/gemini-2.5-flash',
+        'deepseek/deepseek-r1',
+        'meta-llama/llama-3.3-70b-instruct',
+      ],
+    },
+    // Flat list for compatibility (all models combined)
+    models: [
+      'openrouter/free', 'openrouter/auto',
+      'qwen/qwen3-coder:free', 'openai/gpt-oss-120b:free', 'openai/gpt-oss-20b:free',
+      'nvidia/nemotron-3-super-120b-a12b:free', 'minimax/minimax-m2.5:free',
+      'meta-llama/llama-3.3-70b-instruct:free', 'nousresearch/hermes-3-llama-3.1-405b:free',
+      'google/gemma-3-27b-it:free', 'google/gemma-3-12b-it:free',
+      'mistralai/mistral-small-3.1-24b-instruct:free', 'qwen/qwen3-4b:free',
+      'anthropic/claude-sonnet-4-20250514', 'openai/gpt-4o', 'google/gemini-2.5-flash',
+      'deepseek/deepseek-r1',
+    ],
     docs: 'https://openrouter.ai/docs/quickstart',
-    description: 'Meta-provider: 200+ models, one API',
-    tagline: 'One key, every model, unified billing',
+    description: 'Meta-provider: 200+ models, one API. Free models available!',
+    tagline: 'One key, every model — free tier included',
+    dynamicModels: true,
   },
   together: {
     class: TogetherProvider,
@@ -526,6 +580,23 @@ export const PROVIDER_REGISTRY = {
     description: 'Run open models locally via CLI',
     tagline: 'Free, private, runs on your machine',
     isLocal: true,
+    dynamicModels: true,
+  },
+  'ollama-cloud': {
+    class: OllamaProvider,
+    name: 'Ollama Cloud',
+    envKey: 'OLLAMA_CLOUD_API_KEY',
+    models: [
+      'deepseek-v3.1:671b', 'deepseek-v3.2', 'qwen3-coder:480b', 'qwen3.5:397b',
+      'gpt-oss:120b', 'gpt-oss:20b', 'kimi-k2:1t', 'kimi-k2.5',
+      'glm-5', 'glm-4.7', 'mistral-large-3:675b', 'nemotron-3-super',
+      'minimax-m2.5', 'cogito-2.1:671b', 'devstral-2:123b',
+      'gemma3:27b', 'gemma3:12b', 'gemma3:4b',
+    ],
+    docs: 'https://ollama.com/cloud',
+    description: 'Free cloud inference — huge models, no GPU needed',
+    tagline: 'Free preview: 1T Kimi, 671B DeepSeek, 480B Qwen on cloud GPUs',
+    dynamicModels: true,
   },
   lmstudio: {
     class: LMStudioProvider,
@@ -536,12 +607,18 @@ export const PROVIDER_REGISTRY = {
     description: 'GUI for local model management',
     tagline: 'Desktop app, easy local models',
     isLocal: true,
+    dynamicModels: true,
   },
 };
 
 export function createProvider(name, apiKey, model, baseUrl) {
   const reg = PROVIDER_REGISTRY[name];
   if (!reg) throw new Error(`Unknown provider: ${name}`);
+
+  // Ollama Cloud: same class as local Ollama but with API key + cloud base URL
+  if (name === 'ollama-cloud') {
+    return new reg.class(baseUrl || 'https://ollama.com', model || reg.models[0], apiKey);
+  }
 
   if (reg.isLocal) {
     return new reg.class(baseUrl || undefined, model || reg.models[0]);

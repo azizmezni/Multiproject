@@ -1,4 +1,4 @@
-import { exec } from 'child_process';
+import { exec, spawn } from 'child_process';
 import { promisify } from 'util';
 import { writeFile, readFile, mkdir } from 'fs/promises';
 import { join, dirname } from 'path';
@@ -15,22 +15,32 @@ try { await mkdir(SCREENSHOTS_DIR, { recursive: true }); } catch {}
 
 export const qa = {
   // Run a CLI command and return output
+  // Uses spawn with piped stdin to auto-answer Y/N prompts
   async runCommand(command, cwd = process.cwd(), timeout = 30000) {
-    try {
-      const { stdout, stderr } = await execAsync(command, {
-        cwd,
-        timeout,
-        maxBuffer: 1024 * 1024,
+    return new Promise((resolve) => {
+      const proc = spawn(command, {
+        cwd, shell: true, stdio: ['pipe', 'pipe', 'pipe'],
+        env: process.env,
       });
-      return { ok: true, stdout: stdout.trim(), stderr: stderr.trim() };
-    } catch (err) {
-      return {
-        ok: false,
-        stdout: err.stdout?.trim() || '',
-        stderr: err.stderr?.trim() || err.message,
-        code: err.code,
-      };
-    }
+      let stdout = '', stderr = '';
+      // Auto-answer any Y/N prompts
+      try { proc.stdin.write('Y\n'); proc.stdin.end(); } catch {}
+      proc.stdout?.on('data', d => { stdout += d.toString(); });
+      proc.stderr?.on('data', d => { stderr += d.toString(); });
+      proc.on('close', code => resolve({
+        ok: code === 0,
+        stdout: stdout.trim(),
+        stderr: stderr.trim(),
+        code,
+      }));
+      proc.on('error', err => resolve({
+        ok: false, stdout: '', stderr: err.message, code: -1,
+      }));
+      setTimeout(() => {
+        try { proc.kill(); } catch {}
+        resolve({ ok: false, stdout: stdout.trim(), stderr: (stderr + '\nTimed out').trim(), code: -1 });
+      }, timeout);
+    });
   },
 
   // Generate QA test for a task using LLM

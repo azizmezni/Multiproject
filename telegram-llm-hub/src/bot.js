@@ -31,6 +31,7 @@ import { registerAITools } from './handlers/ai-tools.js';
 import { registerSocial } from './handlers/social.js';
 import { registerGenProjects } from './handlers/gen-projects.js';
 import { registerSelfImprove } from './handlers/self-improve.js';
+import { registerGitRepos } from './handlers/git-repos.js';
 import { registerMessages } from './handlers/messages.js';
 
 export function createBot(token) {
@@ -51,9 +52,12 @@ export function createBot(token) {
     memory, arena, challenges, costTracker, gamification,
     templates, vault, collaboration,
     pendingDevRequests, runningBoards, stripMd, safeSend,
+    runningGitRepos: new Map(),
     draftUtils: { extractUrl, fetchLinkMeta, detectLinkType, fetchSocialContent },
     helpers: null,          // set below
     handleDevRequest: null, // set by dev-assistant handler
+    handleGitClone: null,   // set by git-repos handler
+    gitRepoManager: null,   // set by git-repos handler
     runAutoFix: null,       // set by workflows handler
   };
 
@@ -71,6 +75,7 @@ export function createBot(token) {
   registerSocial(bot, shared);
   registerGenProjects(bot, shared);
   registerSelfImprove(bot, shared);
+  registerGitRepos(bot, shared);
   registerMessages(bot, shared);  // catch-all text handler — must be last
 
   // Register Telegram command menu (visible via / button)
@@ -120,6 +125,7 @@ export function createBot(token) {
     { command: 'recall', description: 'Search knowledge base' },
     // Utility
     { command: 'settings', description: 'Open settings menu' },
+    { command: 'repos', description: 'List cloned Git repos' },
     { command: 'drafts', description: 'View draft board' },
     { command: 'templates', description: 'Browse workflow templates' },
     { command: 'ping', description: 'Check bot is alive' },

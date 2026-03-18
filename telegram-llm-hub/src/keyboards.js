@@ -23,6 +23,7 @@ export const kb = {
     return Markup.inlineKeyboard([
       [Markup.button.callback('\ud83d\udcac New Chat', 'new_chat')],
       [Markup.button.callback('🚀 Projects', 'list_projects'), Markup.button.callback('\ud83d\udccb Boards', 'list_boards')],
+      [Markup.button.callback('📚 Git Repos', 'list_git_repos'), Markup.button.callback('📥 Clone Repo', 'git_clone_new')],
       [Markup.button.callback('\ud83d\udce5 Drafts', 'list_drafts'), Markup.button.callback('\ud83d\udd27 Workflows', 'list_workflows')],
       [Markup.button.callback('🔧 Providers', 'providers'), Markup.button.callback('🐛 Fix Bug', 'dev_bugfix')],
       [Markup.button.callback('🧬 Self-Improve', 'self_improve'), Markup.button.callback('📜 Improve History', 'self_improve_history')],
@@ -59,11 +60,29 @@ export const kb = {
     return Markup.inlineKeyboard(buttons);
   },
 
-  // Model selection for a provider
+  // Model selection for a provider (supports grouped models)
   modelSelect(providerName) {
     const reg = PROVIDER_REGISTRY[providerName];
     if (!reg) return null;
-    const buttons = reg.models.map(m => [Markup.button.callback(m, `select_model:${providerName}:${m}`)]);
+    const buttons = [];
+
+    if (reg.modelGroups) {
+      for (const [groupName, models] of Object.entries(reg.modelGroups)) {
+        // Group header (non-clickable, shown as text)
+        buttons.push([Markup.button.callback(`── ${groupName} ──`, `noop`)]);
+        // Show first 8 models per group (Telegram keyboard limit)
+        for (const m of models.slice(0, 8)) {
+          const short = m.split('/').pop().substring(0, 30);
+          // Callback data must be <=64 bytes; use index-based lookup
+          buttons.push([Markup.button.callback(short, `select_model:${providerName}:${m}`.substring(0, 64))]);
+        }
+      }
+    } else {
+      for (const m of reg.models) {
+        buttons.push([Markup.button.callback(m, `select_model:${providerName}:${m}`.substring(0, 64))]);
+      }
+    }
+
     buttons.push([Markup.button.callback('\u25c0\ufe0f Back', 'providers')]);
     return Markup.inlineKeyboard(buttons);
   },
@@ -193,20 +212,15 @@ export const kb = {
     if (linkType === 'github_issue') {
       buttons.push([Markup.button.callback('🐛 Analyze Issue', `smart_analyze:${draftId}`)]);
     }
-    // Social media posts
+    // Social media / any other link — project-focused actions
     const SOCIAL = ['twitter', 'reddit', 'instagram', 'facebook', 'linkedin', 'tiktok', 'threads', 'mastodon'];
     if (SOCIAL.includes(linkType)) {
       buttons.push([
-        Markup.button.callback('📖 Summarize Post', `smart_summarize:${draftId}`),
-        Markup.button.callback('💬 Discuss with AI', `smart_social_chat:${draftId}`),
+        Markup.button.callback('🧠 Extract Project Idea', `smart_extract_idea:${draftId}`),
       ]);
       buttons.push([
-        Markup.button.callback('🔍 Fact Check', `smart_social_factcheck:${draftId}`),
-        Markup.button.callback('✍️ Draft Reply', `smart_social_reply:${draftId}`),
+        Markup.button.callback('🔍 Analyze Content', `smart_analyze:${draftId}`),
       ]);
-      if (linkType === 'reddit') {
-        buttons.push([Markup.button.callback('💡 Summarize Thread', `smart_social_thread:${draftId}`)]);
-      }
     }
 
     // Universal smart action (always first if no type-specific ones)
@@ -286,6 +300,43 @@ export const kb = {
       Markup.button.callback('◀️ Back', 'list_projects'),
     ]);
 
+    return Markup.inlineKeyboard(buttons);
+  },
+
+  // Git Repo list
+  gitRepoList(repos) {
+    const buttons = [];
+    for (const r of repos) {
+      const statusE = { cloned: '✅', running: '▶️', cloning: '⏳', error: '❌' }[r.status] || '📁';
+      const typeE = { node: '🟢', python: '🐍', rust: '🦀', go: '🔵' }[r.project_type] || '📦';
+      const label = `${statusE}${typeE} ${r.name}`.substring(0, 35);
+      buttons.push([
+        Markup.button.callback(label, `git_view:${r.id}`),
+        Markup.button.callback('🗑', `git_delete:${r.id}`),
+      ]);
+    }
+    buttons.push([Markup.button.callback('📥 Clone New Repo', 'git_clone_new')]);
+    buttons.push([Markup.button.callback('◀️ Back', 'main_menu')]);
+    return Markup.inlineKeyboard(buttons);
+  },
+
+  // Git Repo detail view
+  gitRepoView(repoId, repo) {
+    const buttons = [];
+    const isRunning = repo.status === 'running';
+    if (isRunning) {
+      buttons.push([Markup.button.callback('⏹ Stop', `git_stop:${repoId}`)]);
+    } else {
+      buttons.push([Markup.button.callback('▶️ Run', `git_run:${repoId}`)]);
+    }
+    buttons.push([
+      Markup.button.callback('🔄 Git Pull', `git_pull:${repoId}`),
+      Markup.button.callback('🔍 Re-analyze', `git_reanalyze:${repoId}`),
+    ]);
+    buttons.push([
+      Markup.button.callback('🗑 Delete', `git_delete:${repoId}`),
+      Markup.button.callback('◀️ Back', 'list_git_repos'),
+    ]);
     return Markup.inlineKeyboard(buttons);
   },
 
