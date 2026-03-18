@@ -2796,11 +2796,14 @@ async function useTemplate(templateId) {
   }
 }
 
-// ===================== MULTI-MODEL ARENA =====================
+// ===================== CONGRESS (LLM PARLIAMENT) =====================
 async function renderArena(el) {
-  const [history, stats] = await Promise.allSettled([GET('/arena/history'), GET('/arena/stats')]);
+  const [history, stats, congressHistory] = await Promise.allSettled([
+    GET('/arena/history'), GET('/arena/stats'), GET('/congress/history'),
+  ]);
   const battles = history.status === 'fulfilled' ? history.value : [];
   const winStats = stats.status === 'fulfilled' ? stats.value : {};
+  const congresses = congressHistory.status === 'fulfilled' ? congressHistory.value : [];
 
   const statsCards = Object.entries(winStats).map(([prov, s]) =>
     `<div class="card" style="text-align:center;padding:12px">
@@ -2810,10 +2813,24 @@ async function renderArena(el) {
     </div>`
   ).join('');
 
-  const recentBattles = battles.slice(0, 5).map(b => {
+  // Recent congress sessions
+  const recentCongress = congresses.slice(0, 5).map(b => {
+    const ranked = b.votes?.ranked || [];
+    const medals = ['🏆', '🥈', '🥉'];
+    return `<div class="card" style="padding:10px;margin-bottom:8px;cursor:pointer" onclick="viewCongress(${b.id})">
+      <div style="font-size:12px;color:var(--text2);margin-bottom:6px">${escapeHtml(b.prompt.substring(0, 100))}</div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap">${ranked.slice(0, 4).map((r, i) =>
+        `<span class="badge ${i === 0 ? 'badge-green' : ''}">${medals[i] || ''} ${escapeHtml(r.displayName || r.provider)} <span style="opacity:0.7">${r.avgScore}/100</span></span>`
+      ).join('')}</div>
+      <div style="font-size:10px;color:var(--text2);margin-top:4px">${b.created_at || ''}</div>
+    </div>`;
+  }).join('');
+
+  // Recent arena battles
+  const recentBattles = battles.filter(b => b.mode !== 'congress').slice(0, 5).map(b => {
     const providers = Object.keys(b.responses);
     return `<div class="card" style="padding:10px;margin-bottom:8px">
-      <div style="font-size:12px;color:var(--text2);margin-bottom:4px">${escapeHtml(b.prompt.substring(0, 80))}...</div>
+      <div style="font-size:12px;color:var(--text2);margin-bottom:4px">${escapeHtml(b.prompt.substring(0, 80))}</div>
       <div style="display:flex;gap:6px">${providers.map(p =>
         `<span class="badge ${b.winner === p ? 'badge-green' : ''}">${escapeHtml(p)}${b.winner === p ? ' 👑' : ''}</span>`
       ).join('')}</div>
@@ -2821,25 +2838,137 @@ async function renderArena(el) {
   }).join('');
 
   el.innerHTML = `
-    <div class="section-title"><span class="icon">⚔️</span> Multi-Model Arena</div>
+    <div class="section-title"><span class="icon">🏛️</span> Congress <span class="badge badge-blue">LLM Parliament</span></div>
+
     <div class="card" style="margin-bottom:16px">
-      <h3 style="margin-bottom:8px">New Battle</h3>
-      <textarea id="arena-prompt" class="input" rows="3" placeholder="Enter a prompt to test across providers..." style="width:100%;margin-bottom:8px"></textarea>
-      <button class="btn btn-primary" onclick="startBattle()">⚔️ Start Battle</button>
+      <h3 style="margin-bottom:4px">🏛️ New Congress Session</h3>
+      <p style="font-size:12px;color:var(--text2);margin-bottom:8px">All enabled LLMs respond, then each votes on others' answers. Best response wins automatically.</p>
+      <textarea id="congress-prompt" class="input" rows="3" placeholder="Ask all LLMs a question... e.g. 'How should I build a REST API for this project?'" style="width:100%;margin-bottom:8px"></textarea>
+      <div style="display:flex;gap:8px">
+        <button class="btn btn-primary" onclick="startCongress()">🏛️ Start Congress</button>
+        <button class="btn" onclick="startBattle()">⚔️ Quick Arena (3 LLMs, manual vote)</button>
+      </div>
     </div>
-    ${statsCards ? `<div class="section-title" style="font-size:14px">📊 Win Rates</div><div class="grid grid-4" style="margin-bottom:16px">${statsCards}</div>` : ''}
-    ${recentBattles ? `<div class="section-title" style="font-size:14px">🕐 Recent Battles</div>${recentBattles}` : ''}`;
+
+    ${statsCards ? `<div class="section-title" style="font-size:14px">📊 Provider Win Rates</div><div class="grid grid-4" style="margin-bottom:16px">${statsCards}</div>` : ''}
+    ${recentCongress ? `<div class="section-title" style="font-size:14px">🏛️ Recent Congress Sessions</div>${recentCongress}` : ''}
+    ${recentBattles ? `<div class="section-title" style="font-size:14px">⚔️ Recent Arena Battles</div>${recentBattles}` : ''}`;
+}
+
+async function startCongress() {
+  const prompt = document.getElementById('congress-prompt')?.value?.trim();
+  if (!prompt) return showToast('Enter a prompt first', 'warn');
+  showToast('Congress in session — collecting proposals from all LLMs...', 'info');
+  try {
+    const result = await POST('/congress', { prompt });
+    showCongressResult(result);
+  } catch (err) {
+    showToast(err.message, 'error');
+  }
+}
+
+function showCongressResult(result) {
+  const ranked = result.ranked || [];
+  const medals = ['🏆', '🥈', '🥉'];
+
+  // Response cards ranked by score
+  const cards = ranked.map((r, i) => {
+    const resp = result.responses[r.provider];
+    const medal = medals[i] || `#${i + 1}`;
+    const isWinner = i === 0;
+    const reply = resp?.reply || resp?.error || 'No response';
+    const voters = r.voters || [];
+
+    return `<div class="card" style="flex:1;min-width:280px;border:${isWinner ? '2px solid var(--green)' : '1px solid var(--border)'}">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <span style="font-size:16px">${medal} <strong style="color:${isWinner ? 'var(--green)' : 'var(--cyan)'}">${escapeHtml(r.displayName || r.provider)}</strong></span>
+        <span class="badge ${isWinner ? 'badge-green' : ''}" style="font-size:14px">${r.avgScore}/100</span>
+      </div>
+      <div style="font-size:13px;color:var(--text1);white-space:pre-wrap;max-height:250px;overflow:auto;margin-bottom:8px">${resp?.error ? `<span style="color:var(--pink)">Error: ${escapeHtml(resp.error)}</span>` : escapeHtml(reply.substring(0, 800))}${reply.length > 800 ? '...' : ''}</div>
+      <div style="font-size:11px;color:var(--text2);border-top:1px solid var(--border);padding-top:6px">
+        <strong>Votes received:</strong><br>
+        ${voters.map(v => `${escapeHtml(v.voterName)}: <strong>${v.score}</strong>/100 — <em>${escapeHtml(v.reason || '')}</em>`).join('<br>')}
+      </div>
+      ${resp?.latency ? `<div style="font-size:10px;color:var(--text2);margin-top:4px">${resp.latency}ms · ${escapeHtml(resp.model || '')}</div>` : ''}
+    </div>`;
+  }).join('');
+
+  // Vote matrix table
+  const allVotes = result.votes || {};
+  const providers = ranked.map(r => r.provider);
+  let matrix = '<table style="width:100%;font-size:11px;border-collapse:collapse;margin-top:8px"><tr><th style="padding:4px;border:1px solid var(--border)">Voter ↓ / Target →</th>';
+  for (const p of providers) matrix += `<th style="padding:4px;border:1px solid var(--border);color:var(--cyan)">${escapeHtml(p)}</th>`;
+  matrix += '</tr>';
+  for (const voter of providers) {
+    matrix += `<tr><td style="padding:4px;border:1px solid var(--border);font-weight:bold">${escapeHtml(voter)}</td>`;
+    for (const target of providers) {
+      if (voter === target) {
+        matrix += '<td style="padding:4px;border:1px solid var(--border);text-align:center;color:var(--text2)">—</td>';
+      } else {
+        const vote = allVotes[voter]?.[target];
+        const score = vote?.score ?? '—';
+        const color = typeof score === 'number' ? (score >= 80 ? 'var(--green)' : score >= 50 ? 'var(--yellow)' : 'var(--pink)') : 'var(--text2)';
+        matrix += `<td style="padding:4px;border:1px solid var(--border);text-align:center;color:${color};font-weight:bold" title="${escapeHtml(vote?.reason || '')}">${score}</td>`;
+      }
+    }
+    matrix += '</tr>';
+  }
+  matrix += '</table>';
+
+  showWideModal('🏛️ Congress Results', `
+    <div style="background:var(--bg2);padding:8px;border-radius:6px;margin-bottom:12px;font-size:12px;color:var(--text2)"><strong>Prompt:</strong> ${escapeHtml(result.prompt)}</div>
+    <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:16px">${cards}</div>
+    <div class="card" style="padding:12px">
+      <h4 style="margin-bottom:4px">📊 Vote Matrix</h4>
+      <p style="font-size:11px;color:var(--text2);margin-bottom:8px">Hover scores to see reasons. Each LLM rated all others (skipped itself).</p>
+      ${matrix}
+    </div>
+    <div style="margin-top:12px;display:flex;gap:8px">
+      <button class="btn btn-primary" onclick="executeCongress(${result.id})">✅ Execute Winner's Plan</button>
+      <button class="btn" onclick="closeModal()">Close</button>
+    </div>
+  `);
+}
+
+async function executeCongress(id) {
+  showToast('Executing winning plan...', 'info');
+  try {
+    const result = await POST(`/congress/${id}/execute`, {});
+    closeModal();
+    showWideModal('✅ Execution Result', `
+      <div style="font-size:12px;color:var(--text2);margin-bottom:8px">Executed by: <strong>${escapeHtml(result.provider || '')}</strong></div>
+      <div style="font-size:13px;color:var(--text1);white-space:pre-wrap;max-height:500px;overflow:auto">${escapeHtml(result.text || '')}</div>
+    `);
+  } catch (err) {
+    showToast(err.message, 'error');
+  }
+}
+
+async function viewCongress(id) {
+  try {
+    const battle = await GET(`/congress/${id}`);
+    showCongressResult({
+      id: battle.id,
+      prompt: battle.prompt,
+      responses: battle.responses,
+      votes: battle.votes?.allVotes || {},
+      ranked: battle.votes?.ranked || [],
+      winner: battle.winner,
+    });
+  } catch (err) {
+    showToast(err.message, 'error');
+  }
 }
 
 async function startBattle() {
-  const prompt = document.getElementById('arena-prompt')?.value?.trim();
-  if (!prompt) return showToast('⚠️', 'Enter a prompt first');
-  showToast('⚔️', 'Battle starting...');
+  const prompt = document.getElementById('congress-prompt')?.value?.trim();
+  if (!prompt) return showToast('Enter a prompt first', 'warn');
+  showToast('Battle starting...', 'info');
   try {
     const result = await POST('/arena/battle', { prompt });
     showArenaBattle(result);
   } catch (err) {
-    showToast('❌', err.message);
+    showToast(err.message, 'error');
   }
 }
 
@@ -2865,7 +2994,7 @@ function showArenaBattle(battle) {
 async function voteBattle(battleId, winner) {
   await POST(`/arena/${battleId}/vote`, { winner });
   closeModal();
-  showToast('👑', `Voted for ${winner}!`);
+  showToast(`Voted for ${winner}!`, 'success');
   renderArena(document.getElementById('content'));
 }
 

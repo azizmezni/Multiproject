@@ -340,6 +340,15 @@ export const kb = {
     return Markup.inlineKeyboard(buttons);
   },
 
+  // Congress result keyboard
+  congressResult(battleId) {
+    return Markup.inlineKeyboard([
+      [Markup.button.callback('✅ Execute Winner', `congress_execute:${battleId}`)],
+      [Markup.button.callback('📊 Full Vote Details', `congress_details:${battleId}`)],
+      [Markup.button.callback('◀️ Back', 'main_menu')],
+    ]);
+  },
+
   // Settings menu
   settingsMenu() {
     return Markup.inlineKeyboard([

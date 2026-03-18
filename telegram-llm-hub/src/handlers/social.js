@@ -1,4 +1,5 @@
 import { safeSend } from '../bot-helpers.js';
+import kb from '../keyboards.js';
 
 export function registerSocial(bot, shared) {
   const { memory, arena, challenges, costTracker, gamification, templates, vault, collaboration, sessions, llm } = shared;
@@ -48,32 +49,114 @@ export function registerSocial(bot, shared) {
   bot.command('arena', async (ctx) => {
     const userId = ctx.from.id;
     const prompt = ctx.message.text.replace('/arena', '').trim();
-    if (!prompt) return safeSend(ctx, '\u2694\ufe0f Usage: /arena <prompt>\nSends to all enabled providers simultaneously.');
-    await safeSend(ctx, '\u2694\ufe0f Arena battle starting...');
+    if (!prompt) return safeSend(ctx, '⚔️ Usage: /arena <prompt>\nSends to all enabled providers simultaneously.');
+    await safeSend(ctx, '⚔️ Arena battle starting...');
     llm.initDefaults(userId);
     try {
       const result = await arena.battle(userId, prompt);
-      let response = `\u2694\ufe0f *Arena Battle*\n_${prompt}_\n\n`;
+      let response = `⚔️ *Arena Battle*\n_${prompt}_\n\n`;
       for (const [prov, r] of Object.entries(result.responses || {})) {
-        const snippet = r.error ? `\u274c ${r.error}` : (r.reply || '').substring(0, 400);
+        const snippet = r.error ? `❌ ${r.error}` : (r.reply || '').substring(0, 400);
         response += `*${prov}* (${r.latency || 0}ms):\n${snippet}\n\n`;
       }
       response += `Vote: /vote ${result.id} <provider>`;
       await safeSend(ctx, response);
     } catch (err) {
-      await safeSend(ctx, `\u274c Arena error: ${err.message}`);
+      await safeSend(ctx, `❌ Arena error: ${err.message}`);
     }
   });
 
   bot.command('vote', async (ctx) => {
     const parts = ctx.message.text.replace('/vote', '').trim().split(/\s+/);
-    if (parts.length < 2) return safeSend(ctx, '\ud83d\udc51 Usage: /vote <battle_id> <provider>');
+    if (parts.length < 2) return safeSend(ctx, '👑 Usage: /vote <battle_id> <provider>');
     try {
       arena.vote(parseInt(parts[0]), parts[1]);
-      await safeSend(ctx, `\ud83d\udc51 Voted for *${parts[1]}* in battle #${parts[0]}!`);
+      await safeSend(ctx, `👑 Voted for *${parts[1]}* in battle #${parts[0]}!`);
     } catch (err) {
-      await safeSend(ctx, `\u274c ${err.message}`);
+      await safeSend(ctx, `❌ ${err.message}`);
     }
+  });
+
+  // --- Congress (LLM Parliament) ---
+  bot.command('congress', async (ctx) => {
+    const userId = ctx.from.id;
+    const prompt = ctx.message.text.replace('/congress', '').trim();
+    if (!prompt) return safeSend(ctx, '🏛️ Usage: /congress <prompt>\nAll enabled LLMs respond, then vote on each other\'s answers. Best response wins.');
+    await safeSend(ctx, '🏛️ *Congress in session...*\n\n📋 Phase 1: Collecting proposals from all LLMs...', { parse_mode: 'Markdown' });
+
+    try {
+      const result = await arena.congress(userId, prompt, (phase, data) => {
+        if (phase === 'proposals') {
+          safeSend(ctx, `📡 Sending to ${data.count} providers: ${data.providers.join(', ')}`);
+        } else if (phase === 'voting') {
+          safeSend(ctx, `🗳️ Phase 2: ${data.responded} LLMs responded. Now voting...`);
+        }
+      });
+
+      // Build results message
+      const medals = ['🏆', '🥈', '🥉'];
+      let msg = `🏛️ *Congress Results*\n_${prompt.substring(0, 100)}_\n\n`;
+
+      // Ranked results
+      for (let i = 0; i < result.ranked.length; i++) {
+        const r = result.ranked[i];
+        const medal = medals[i] || `#${i + 1}`;
+        const reply = result.responses[r.provider]?.reply || '';
+        msg += `${medal} *${r.displayName}* — avg ${r.avgScore}/100\n`;
+        msg += `${reply.substring(0, 300)}${reply.length > 300 ? '...' : ''}\n\n`;
+      }
+
+      // Vote breakdown for winner
+      const winnerScores = result.scores[result.winner];
+      if (winnerScores?.voters?.length > 0) {
+        msg += `📊 *Winner votes:*\n`;
+        for (const v of winnerScores.voters) {
+          msg += `  ${v.voterName}: ${v.score}/100 — _${v.reason}_\n`;
+        }
+      }
+
+      await safeSend(ctx, msg, kb.congressResult(result.id));
+    } catch (err) {
+      await safeSend(ctx, `❌ Congress error: ${err.message}`);
+    }
+  });
+
+  // Execute winner callback
+  bot.action(/congress_execute:(\d+)/, async (ctx) => {
+    await ctx.answerCbQuery();
+    const battleId = parseInt(ctx.match[1]);
+    await ctx.reply('⚡ Executing winning plan...');
+    try {
+      const result = await arena.executeWinner(ctx.from.id, battleId);
+      let msg = `✅ *Execution Result* (by ${result.provider}):\n\n${result.text.substring(0, 3500)}`;
+      await safeSend(ctx, msg);
+    } catch (err) {
+      await ctx.reply(`❌ Execution failed: ${err.message}`);
+    }
+  });
+
+  // View full congress details
+  bot.action(/congress_details:(\d+)/, async (ctx) => {
+    await ctx.answerCbQuery();
+    const battle = arena.get(parseInt(ctx.match[1]));
+    if (!battle) return ctx.reply('❌ Session not found');
+
+    const ranked = battle.votes?.ranked || [];
+    let msg = `🏛️ *Congress #${battle.id} — Full Results*\n\n`;
+    msg += `📝 _${battle.prompt.substring(0, 200)}_\n\n`;
+
+    // Show all vote details
+    const allVotes = battle.votes?.allVotes || {};
+    msg += `📊 *Vote Matrix:*\n`;
+    for (const [voter, votes] of Object.entries(allVotes)) {
+      if (Object.keys(votes).length === 0) continue;
+      msg += `\n*${voter} voted:*\n`;
+      for (const [target, v] of Object.entries(votes)) {
+        msg += `  → ${target}: ${v.score}/100 (_${v.reason}_)\n`;
+      }
+    }
+
+    await safeSend(ctx, msg);
   });
 
   // --- Gamification & Challenges ---

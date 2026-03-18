@@ -225,7 +225,7 @@ db.exec(`
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
 
-  -- Multi-Model Arena
+  -- Multi-Model Arena / Congress
   CREATE TABLE IF NOT EXISTS arena_battles (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL,
@@ -233,6 +233,9 @@ db.exec(`
     providers TEXT NOT NULL,
     responses TEXT NOT NULL DEFAULT '{}',
     winner TEXT,
+    mode TEXT DEFAULT 'arena',
+    votes TEXT DEFAULT '{}',
+    execution TEXT DEFAULT '',
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
   CREATE INDEX IF NOT EXISTS idx_arena_user ON arena_battles(user_id);
@@ -370,5 +373,16 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_gitrepos_user ON git_repos(user_id);
 `);
+
+// Congress mode columns for arena_battles
+try { db.prepare("SELECT mode FROM arena_battles LIMIT 0").get(); } catch {
+  db.exec("ALTER TABLE arena_battles ADD COLUMN mode TEXT DEFAULT 'arena'");
+}
+try { db.prepare("SELECT votes FROM arena_battles LIMIT 0").get(); } catch {
+  db.exec("ALTER TABLE arena_battles ADD COLUMN votes TEXT DEFAULT '{}'");
+}
+try { db.prepare("SELECT execution FROM arena_battles LIMIT 0").get(); } catch {
+  db.exec("ALTER TABLE arena_battles ADD COLUMN execution TEXT DEFAULT ''");
+}
 
 export default db;

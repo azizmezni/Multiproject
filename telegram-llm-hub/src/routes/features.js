@@ -103,6 +103,42 @@ router.get('/arena/stats', (req, res) => {
   res.json(arena.getStats(getUserId(req)));
 });
 
+// ==================== CONGRESS (LLM PARLIAMENT) ====================
+router.post('/congress', async (req, res) => {
+  const userId = getUserId(req);
+  const { prompt } = req.body;
+  if (!prompt) return res.status(400).json({ error: 'Prompt required' });
+  try {
+    const result = await arena.congress(userId, prompt);
+    challenges.trackAction(userId, 'arena_battle');
+    gamification.addXP(userId, 'arena_battle');
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.post('/congress/:id/execute', async (req, res) => {
+  const userId = getUserId(req);
+  try {
+    const result = await arena.executeWinner(userId, parseInt(req.params.id), req.body.customPrompt || null);
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.get('/congress/history', (req, res) => {
+  const all = arena.listByUser(getUserId(req));
+  res.json(all.filter(b => b.mode === 'congress'));
+});
+
+router.get('/congress/:id', (req, res) => {
+  const battle = arena.get(parseInt(req.params.id));
+  if (!battle) return res.status(404).json({ error: 'Not found' });
+  res.json(battle);
+});
+
 // ==================== PERSISTENT MEMORY ====================
 router.get('/memory', (req, res) => {
   res.json(memory.list(getUserId(req), req.query.category));
