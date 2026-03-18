@@ -306,7 +306,35 @@ export class OpenRouterProvider extends OpenAICompatibleProvider {
     });
   }
 
-  // OpenRouter supports vision via OpenAI image_url format (inherited from base)
+  // Override chat to add OpenRouter-specific provider settings (bypass data policy restrictions)
+  async chat(messages, opts = {}) {
+    const res = await fetch(`${this.baseUrl}${this.chatPath}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${this.apiKey}`,
+        ...this.extraHeaders,
+      },
+      body: JSON.stringify({
+        model: this.model,
+        messages,
+        max_tokens: opts.max_tokens || 4096,
+        provider: {
+          allow_fallbacks: true,
+          data_collection: 'allow',
+        },
+      }),
+    });
+
+    if (!res.ok) {
+      const errBody = await res.text().catch(() => res.statusText);
+      throw new Error(`OpenRouter error ${res.status}: ${errBody.substring(0, 200)}`);
+    }
+
+    const data = await res.json();
+    const text = data.choices?.[0]?.message?.content || '';
+    return stripThinkTags(text);
+  }
 }
 
 // --- Together AI (OpenAI-compatible) ---
@@ -617,7 +645,7 @@ export function createProvider(name, apiKey, model, baseUrl) {
 
   // Ollama Cloud: same class as local Ollama but with API key + cloud base URL
   if (name === 'ollama-cloud') {
-    return new reg.class(baseUrl || 'https://ollama.com', model || reg.models[0], apiKey);
+    return new reg.class(baseUrl || 'https://ollama.com/api', model || reg.models[0], apiKey);
   }
 
   if (reg.isLocal) {
