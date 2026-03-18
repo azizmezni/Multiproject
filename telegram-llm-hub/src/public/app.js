@@ -55,6 +55,7 @@ async function refreshAll() {
     const provData = val(1, { providers: state.providers, registry: state.registry });
     state.providers = provData.providers || [];
     state.registry = provData.registry || [];
+    state.lastUsedProvider = provData.lastUsed || null;
     state.boards = val(2, state.boards || []);
     state.workflows = val(3, state.workflows || []);
     state.drafts = val(4, state.drafts || []);
@@ -88,23 +89,32 @@ function updateHeader() {
 function updateActiveProviderWidget() {
   const providers = state.providers || [];
   const enabled = providers.filter(p => p.enabled);
-  // Active = first enabled provider with a key (or local)
-  const active = enabled.find(p => p.api_key || p.is_local) || enabled[0];
+  // Primary = first enabled provider with a key (or local) — what would be tried first
+  const primary = enabled.find(p => p.api_key || p.is_local) || enabled[0];
+  // lastUsed = the provider that actually handled the last LLM call (may differ due to fallback)
+  const lastUsed = state.lastUsedProvider;
   const nameEl = document.getElementById('apw-name');
-  if (active) {
-    nameEl.textContent = active.display_name;
+
+  if (lastUsed && primary && lastUsed.name !== primary.name) {
+    // Fallback happened — show which provider actually ran
+    nameEl.innerHTML = `${escapeHtml(lastUsed.displayName)} <span style="font-size:10px;opacity:0.6">(fallback)</span>`;
+  } else if (primary) {
+    nameEl.textContent = primary.display_name;
   } else {
     nameEl.textContent = 'None';
   }
-  // Build dropdown menu
+
+  // Build dropdown menu — show all enabled providers, mark which is active and which last-used
   const menu = document.getElementById('apw-menu');
   menu.innerHTML = enabled.map(p => {
-    const isActive = active && p.name === active.name;
+    const isPrimary = primary && p.name === primary.name;
+    const isLastUsed = lastUsed && p.name === lastUsed.name;
     const hasKey = p.api_key || p.is_local;
     const dotClass = hasKey ? 'on' : 'nokey';
-    return `<div class="apw-item ${isActive ? 'active' : ''}" onclick="switchActiveProvider('${p.name}')">
+    const badge = isLastUsed && !isPrimary ? ' <span style="font-size:9px;color:var(--yellow)">(in use)</span>' : '';
+    return `<div class="apw-item ${isPrimary ? 'active' : ''}" onclick="switchActiveProvider('${p.name}')">
       <span class="apw-dot ${dotClass}"></span>
-      <span>${escapeHtml(p.display_name)}</span>
+      <span>${escapeHtml(p.display_name)}${badge}</span>
       <span class="apw-item-model">${escapeHtml(p.model)}</span>
     </div>`;
   }).join('') + (enabled.length === 0 ? '<div class="apw-item" style="color:var(--text2)">No providers enabled</div>' : '');

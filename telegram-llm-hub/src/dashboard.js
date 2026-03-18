@@ -111,7 +111,8 @@ export function createDashboard(port = 9999) {
       modelGroups: v.modelGroups || null,
       dynamicModels: !!v.dynamicModels,
     }));
-    res.json({ providers, registry });
+    const lastUsed = llm.getLastUsedProvider(userId);
+    res.json({ providers, registry, lastUsed });
   });
 
   app.put('/api/providers/:name/toggle', (req, res) => {
@@ -1502,6 +1503,7 @@ CRITICAL RULES:
         let currentCmd = step.cmd;
         let succeeded = false;
         const prevAttempts = [];
+        const seenErrors = new Map(); // Track repeated errors
 
         while (true) {
           if (isLastStep && entry) entry.phase = 'running';
@@ -1514,9 +1516,25 @@ CRITICAL RULES:
             break;
           }
 
-          // Step failed — ask LLM to fix
+          // Step failed — check for repeated errors before asking LLM
           const errOutput = (result.stderr || result.stdout || 'Unknown error').substring(0, 2000);
+          const errKey = errOutput.substring(0, 200).trim();
+          const errCount = (seenErrors.get(errKey) || 0) + 1;
+          seenErrors.set(errKey, errCount);
           fixAttempts++;
+
+          // Give up if same error repeats 3+ times — LLM can't fix it
+          if (errCount >= 3) {
+            logs.push(`\n🛑 Same error repeated ${errCount} times — LLM cannot fix this. Skipping step.\n`);
+            logs.push(`Error: ${errKey.substring(0, 300)}\n`);
+            break;
+          }
+
+          // Give up after 10 total attempts across all error types
+          if (fixAttempts > 10) {
+            logs.push(`\n🛑 Too many fix attempts (${fixAttempts}). Giving up on this step.\n`);
+            break;
+          }
 
           logs.push(`\n⚠️ Step failed (attempt ${fixAttempts}). Asking LLM to fix...\n`);
           try {
@@ -1525,8 +1543,15 @@ CRITICAL RULES:
             const fix = await diagnoseStepFailure(repo.clone_dir, repo.name, repo.project_type, step, errOutput, prevAttempts, llm, userId);
             logs.push(`🔧 ${fix.diagnosis || 'Fixing...'}\n`);
 
+            // LLM says this is unfixable
+            if (fix.give_up) {
+              logs.push(`🛑 LLM says this is unfixable: ${fix.diagnosis}\n`);
+              break;
+            }
+
             for (const fc of (fix.fix_commands || [])) {
-              await runStep(fc, repo.clone_dir, 60000);
+              const fcResult = await runStep(fc, repo.clone_dir, 60000);
+              if (!fcResult.ok) logs.push(`⚠️ Fix command failed: ${(fcResult.stderr || '').substring(0, 200)}\n`);
             }
 
             if (fix.retry_cmd && fix.retry_cmd !== 'null') {

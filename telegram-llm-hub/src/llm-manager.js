@@ -27,6 +27,11 @@ const VISION_PROVIDERS = ['claude', 'openai', 'gemini', 'openrouter'];
 class LLMManager {
   constructor() {
     this.providerCache = new Map();
+    this.lastUsedProvider = new Map(); // userId -> { name, displayName, model }
+  }
+
+  getLastUsedProvider(userId) {
+    return this.lastUsedProvider.get(userId) || null;
   }
 
   // Initialize default providers from env for a user
@@ -153,6 +158,7 @@ class LLMManager {
       try {
         const provider = this._buildProvider(row);
         const response = await provider.chat(messages, opts);
+        this.lastUsedProvider.set(userId, { name: row.name, displayName: row.display_name, model: row.model });
         return {
           text: response,
           provider: row.display_name,
@@ -220,11 +226,12 @@ class LLMManager {
             .run(p.priority + 1, userId, p.name);
         }
       }
-      // Set target to priority 1 (top)
-      db.prepare('UPDATE providers SET priority = 1 WHERE user_id = ? AND name = ?')
+      // Set target to priority 1 (top) and ensure it's enabled
+      db.prepare('UPDATE providers SET priority = 1, enabled = 1 WHERE user_id = ? AND name = ?')
         .run(userId, name);
     });
     tx();
+    this.clearCache(userId, name);
   }
 
   reorderProvider(userId, name, direction) {

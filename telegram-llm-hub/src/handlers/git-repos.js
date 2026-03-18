@@ -174,6 +174,7 @@ export function registerGitRepos(bot, shared) {
       let currentCmd = step.cmd;
       let succeeded = false;
       const prevAttempts = [];
+      const seenErrors = new Map();
 
       while (true) {
         const timeout = isLastStep ? 30000 : 120000;
@@ -187,10 +188,22 @@ export function registerGitRepos(bot, shared) {
           break;
         }
 
-        // Step failed — ask LLM to fix
+        // Step failed — check for repeated errors
         const errOutput = (result.stderr || result.stdout || 'Unknown error').substring(0, 2000);
         lastError = errOutput;
+        const errKey = errOutput.substring(0, 200).trim();
+        const errCount = (seenErrors.get(errKey) || 0) + 1;
+        seenErrors.set(errKey, errCount);
         fixAttempts++;
+
+        if (errCount >= 3) {
+          await ctx.reply(`🛑 Same error repeated ${errCount} times — LLM cannot fix this. Skipping step.`);
+          break;
+        }
+        if (fixAttempts > 10) {
+          await ctx.reply(`🛑 Too many fix attempts (${fixAttempts}). Giving up on this step.`);
+          break;
+        }
 
         await ctx.reply(`⚠️ Step failed (attempt ${fixAttempts}). Asking LLM to fix...\n\`${errOutput.substring(0, 200)}\``);
 
@@ -199,7 +212,11 @@ export function registerGitRepos(bot, shared) {
           const fix = await diagnoseStepFailure(repo.clone_dir, repo.name, repo.project_type, step, errOutput, prevAttempts, llm, ctx.from.id);
           await ctx.reply(`🔧 ${fix.diagnosis || 'Fixing...'}`);
 
-          // Run fix commands
+          if (fix.give_up) {
+            await ctx.reply(`🛑 LLM says this is unfixable: ${fix.diagnosis}`);
+            break;
+          }
+
           for (const fc of (fix.fix_commands || [])) {
             await ctx.reply(`> \`${fc}\``);
             const fcResult = await qa.runCommand(fc, repo.clone_dir, 60000);
@@ -208,7 +225,6 @@ export function registerGitRepos(bot, shared) {
             }
           }
 
-          // Use corrected command if provided
           if (fix.retry_cmd && fix.retry_cmd !== 'null') {
             currentCmd = fix.retry_cmd;
             await ctx.reply(`🔧 Retrying with: \`${currentCmd}\``);

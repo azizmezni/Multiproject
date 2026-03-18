@@ -373,7 +373,8 @@ Return ONLY valid JSON (no markdown fences):
 {
   "diagnosis": "What went wrong (1-2 sentences)",
   "fix_commands": ["shell command 1", "shell command 2"],
-  "retry_cmd": "corrected version of the failed command (or null if original is fine after fixes)"
+  "retry_cmd": "corrected version of the failed command (or null if original is fine after fixes)",
+  "give_up": false
 }
 
 RULES:
@@ -384,6 +385,12 @@ RULES:
 - CRITICAL: All commands MUST be non-interactive. Never use commands that prompt for Y/N or user input.
   - pip uninstall: always add "-y" flag
   - Use force/quiet flags for destructive operations (e.g. "rmdir /s /q", "del /f /q")
+- IMPORTANT: Look at PREVIOUS ATTEMPTS carefully. If the same error keeps repeating, your previous fix didn't work.
+  Try a FUNDAMENTALLY DIFFERENT approach, not the same fix again.
+  Examples of different approaches: use a different package version, skip optional deps, use --no-deps,
+  install from source, use a different tool, modify config files, set env vars.
+- If you believe this error is UNFIXABLE (e.g. requires manual setup, GUI interaction, paid API key,
+  unsupported OS, hardware requirement), set "give_up": true and explain why in diagnosis.
 - Don't repeat previous failed fixes`
     },
     {
