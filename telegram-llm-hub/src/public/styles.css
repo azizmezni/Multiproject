@@ -77,6 +77,11 @@ body {
   transition: border-color 0.2s, background 0.2s;
 }
 .apw-current:hover { border-color: var(--cyan); background: var(--bg2); }
+.apw-model-tag {
+  font-size: 10px; color: var(--purple); opacity: 0.8;
+  max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-weight: 400;
+}
 .apw-arrow { font-size: 10px; color: var(--text2); transition: transform 0.2s; }
 .apw-dropdown.open .apw-arrow { transform: rotate(180deg); }
 .apw-menu {

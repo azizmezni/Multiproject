@@ -104,13 +104,17 @@ function updateActiveProviderWidget() {
   const lastUsed = state.lastUsedProvider;
   const nameEl = document.getElementById('apw-name');
 
+  const modelEl = document.getElementById('apw-model');
   if (lastUsed && primary && lastUsed.name !== primary.name) {
     // Fallback happened — show which provider actually ran
     nameEl.innerHTML = `${escapeHtml(lastUsed.displayName)} <span style="font-size:10px;opacity:0.6">(fallback)</span>`;
+    modelEl.textContent = lastUsed.model || '';
   } else if (primary) {
     nameEl.textContent = primary.display_name;
+    modelEl.textContent = primary.model || '';
   } else {
     nameEl.textContent = 'None';
+    modelEl.textContent = '';
   }
 
   // Build dropdown menu — show all enabled providers, mark which is active and which last-used
