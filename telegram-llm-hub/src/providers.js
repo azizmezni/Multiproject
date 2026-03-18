@@ -328,6 +328,9 @@ export class OpenRouterProvider extends OpenAICompatibleProvider {
 
     if (!res.ok) {
       const errBody = await res.text().catch(() => res.statusText);
+      if (res.status === 404 && errBody.includes('guardrail')) {
+        throw new Error(`OpenRouter: Privacy settings blocking requests. Go to https://openrouter.ai/settings/privacy and set Data Policy to "Allow all" to use free models.`);
+      }
       throw new Error(`OpenRouter error ${res.status}: ${errBody.substring(0, 200)}`);
     }
 
@@ -645,7 +648,7 @@ export function createProvider(name, apiKey, model, baseUrl) {
 
   // Ollama Cloud: same class as local Ollama but with API key + cloud base URL
   if (name === 'ollama-cloud') {
-    return new reg.class(baseUrl || 'https://ollama.com/api', model || reg.models[0], apiKey);
+    return new reg.class(baseUrl || 'https://ollama.com', model || reg.models[0], apiKey);
   }
 
   if (reg.isLocal) {
