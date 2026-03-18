@@ -1381,18 +1381,29 @@ CRITICAL RULES:
 
         const safeUrl = cloneUrl.replace(/[;&|`$"]/g, '');
 
+        // If target dir already exists (leftover from failed clone), remove it first
+        if (existsSync(repoDir)) {
+          try {
+            await new Promise((resolve, reject) => {
+              const proc = spawn(`rmdir /s /q "${repoDir}"`, { shell: true });
+              proc.on('close', () => resolve());
+              setTimeout(() => { try { proc.kill(); } catch {} resolve(); }, 10000);
+            });
+          } catch {}
+        }
+
         // Clone
         try {
           await new Promise((resolve, reject) => {
             const proc = spawn(`git clone "${safeUrl}" "${repoDir}"`, { shell: true, cwd: reposDir });
-            proc.on('close', code => code === 0 ? resolve() : reject(new Error(`git clone exit ${code}`)));
+            let stderr = '';
+            proc.stderr?.on('data', d => { stderr += d.toString(); });
+            proc.on('close', code => code === 0 ? resolve() : reject(new Error(stderr || `git clone exit ${code}`)));
             setTimeout(() => { try { proc.kill(); } catch {} reject(new Error('Clone timed out')); }, 120000);
           });
         } catch (err) {
-          if (!err.message.includes('already exists')) {
-            console.log('[git-repos] clone error:', err.message);
-            return;
-          }
+          console.log('[git-repos] clone error:', err.message);
+          return;
         }
 
         // Deep-analyze repo: reads README, package.json, Makefile, etc. + LLM

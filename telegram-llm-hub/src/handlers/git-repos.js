@@ -35,10 +35,15 @@ export function registerGitRepos(bot, shared) {
     const { mkdir } = await import('fs/promises');
     await mkdir(REPOS_DIR, { recursive: true });
 
-    // Clone
+    // If target dir already exists (leftover from failed clone), remove it first
     const safeUrl = cloneUrl.replace(/[;&|`$"]/g, '');
+    if (existsSync(repoDir)) {
+      await qa.runCommand(`rmdir /s /q "${repoDir}"`, REPOS_DIR, 10000);
+    }
+
+    // Clone
     const cloneResult = await qa.runCommand(`git clone "${safeUrl}" "${repoDir}"`, REPOS_DIR, 120000);
-    if (!cloneResult.ok && !cloneResult.stderr?.includes('already exists')) {
+    if (!cloneResult.ok) {
       await ctx.reply(`❌ Clone failed: ${cloneResult.stderr?.substring(0, 500) || 'Unknown error'}`);
       return null;
     }
