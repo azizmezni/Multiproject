@@ -227,6 +227,18 @@ export class GeminiProvider extends BaseProvider {
     const data = await res.json();
     return data.candidates?.[0]?.content?.parts?.[0]?.text || '';
   }
+
+  async listModels() {
+    const res = await fetch(
+      `${this.baseUrl}/v1beta/models?key=${this.apiKey}`
+    );
+    if (!res.ok) throw new Error(`Gemini models error ${res.status}`);
+    const data = await res.json();
+    return (data.models || [])
+      .filter(m => m.supportedGenerationMethods?.includes('generateContent'))
+      .map(m => m.name.replace('models/', ''))
+      .sort();
+  }
 }
 
 // --- Mistral AI (OpenAI-compatible) ---
@@ -240,6 +252,18 @@ export class MistralProvider extends OpenAICompatibleProvider {
 export class GroqProvider extends OpenAICompatibleProvider {
   constructor(apiKey, model = 'llama-3.3-70b-versatile') {
     super('groq', 'Groq', apiKey, model, 'https://api.groq.com/openai');
+  }
+
+  async listModels() {
+    const res = await fetch(`${this.baseUrl}/v1/models`, {
+      headers: { 'Authorization': `Bearer ${this.apiKey}` },
+    });
+    if (!res.ok) throw new Error(`Groq models error ${res.status}`);
+    const data = await res.json();
+    return (data.data || [])
+      .filter(m => m.id && !m.id.includes('whisper') && !m.id.includes('guard') && !m.id.includes('tts') && !m.id.includes('compound') && m.active !== false)
+      .map(m => m.id)
+      .sort();
   }
 }
 
@@ -338,6 +362,20 @@ export class OpenRouterProvider extends OpenAICompatibleProvider {
     const text = data.choices?.[0]?.message?.content || '';
     return stripThinkTags(text);
   }
+
+  async listModels() {
+    const res = await fetch('https://openrouter.ai/api/v1/models');
+    if (!res.ok) throw new Error(`OpenRouter models error ${res.status}`);
+    const data = await res.json();
+    const free = (data.data || []).filter(m => m.id.includes(':free') || m.id.startsWith('openrouter/'));
+    const paid = (data.data || []).filter(m => !m.id.includes(':free') && !m.id.startsWith('openrouter/'));
+    return {
+      groups: {
+        '🆓 Free': ['openrouter/free', 'openrouter/auto', ...free.filter(m => !m.id.startsWith('openrouter/')).map(m => m.id).sort()],
+        '💎 Premium': paid.slice(0, 30).map(m => m.id).sort(),
+      },
+    };
+  }
 }
 
 // --- Together AI (OpenAI-compatible) ---
@@ -366,6 +404,15 @@ export class FireworksProvider extends OpenAICompatibleProvider {
 export class CerebrasProvider extends OpenAICompatibleProvider {
   constructor(apiKey, model = 'llama-3.3-70b') {
     super('cerebras', 'Cerebras', apiKey, model, 'https://api.cerebras.ai');
+  }
+
+  async listModels() {
+    const res = await fetch(`${this.baseUrl}/v1/models`, {
+      headers: { 'Authorization': `Bearer ${this.apiKey}` },
+    });
+    if (!res.ok) throw new Error(`Cerebras models error ${res.status}`);
+    const data = await res.json();
+    return (data.data || []).map(m => m.id).sort();
   }
 }
 
@@ -459,10 +506,11 @@ export const PROVIDER_REGISTRY = {
     class: GeminiProvider,
     name: 'Google Gemini',
     envKey: 'GEMINI_API_KEY',
-    models: ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-2.0-pro', 'gemini-1.5-pro'],
+    models: ['gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-3-flash-preview', 'gemini-3.1-pro-preview', 'gemini-2.0-flash'],
     docs: 'https://ai.google.dev/gemini-api/docs/quickstart',
     description: 'Huge context window, multimodal',
     tagline: '1M+ token context, vision built-in',
+    dynamicModels: true,
   },
   mistral: {
     class: MistralProvider,
@@ -477,10 +525,11 @@ export const PROVIDER_REGISTRY = {
     class: GroqProvider,
     name: 'Groq',
     envKey: 'GROQ_API_KEY',
-    models: ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'deepseek-r1-distill-llama-70b', 'gemma2-9b-it'],
+    models: ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'openai/gpt-oss-120b', 'openai/gpt-oss-20b', 'qwen/qwen3-32b', 'meta-llama/llama-4-scout-17b-16e-instruct', 'moonshotai/kimi-k2-instruct-0905'],
     docs: 'https://console.groq.com/docs/quickstart',
     description: 'Ultra-fast LPU inference for open models',
     tagline: 'Fastest open-model inference (LPU)',
+    dynamicModels: true,
   },
   cohere: {
     class: CohereProvider,
@@ -597,10 +646,11 @@ export const PROVIDER_REGISTRY = {
     class: CerebrasProvider,
     name: 'Cerebras',
     envKey: 'CEREBRAS_API_KEY',
-    models: ['llama-3.3-70b', 'llama-3.1-8b', 'deepseek-r1-distill-llama-70b'],
+    models: ['llama3.1-8b', 'gpt-oss-120b', 'qwen-3-235b-a22b-instruct-2507', 'zai-glm-4.7'],
     docs: 'https://inference-docs.cerebras.ai/introduction',
     description: 'Fastest inference (wafer-scale chip)',
     tagline: 'Record-breaking speed, wafer-scale AI',
+    dynamicModels: true,
   },
   ollama: {
     class: OllamaProvider,

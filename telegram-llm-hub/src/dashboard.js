@@ -13,7 +13,7 @@ import { drafts } from './drafts.js';
 import { workflows, NODE_TYPES } from './workflows.js';
 import { gamification } from './gamification.js';
 import { qa } from './qa.js';
-import { PROVIDER_REGISTRY } from './providers.js';
+import { PROVIDER_REGISTRY, createProvider } from './providers.js';
 import { scheduler } from './scheduler.js';
 import { costTracker } from './cost-tracker.js';
 import { challenges } from './challenges.js';
@@ -147,7 +147,7 @@ export function createDashboard(port = 9999) {
     res.json({ ok: true });
   });
 
-  // Fetch live models from a running provider (Ollama, LM Studio, OpenRouter)
+  // Fetch live models from a running provider (supports all providers with dynamicModels)
   app.get('/api/providers/:name/models', async (req, res) => {
     try {
       const userId = getUserId(req);
@@ -156,7 +156,9 @@ export function createDashboard(port = 9999) {
       if (!row) return res.status(404).json({ error: 'Provider not found' });
 
       let models = [];
+      let groups = null;
 
+      // Local providers — fetch from running server
       if (provName === 'ollama') {
         const baseUrl = row.base_url || 'http://localhost:11434';
         const resp = await fetch(`${baseUrl}/api/tags`, { signal: AbortSignal.timeout(5000) });
@@ -187,19 +189,34 @@ export function createDashboard(port = 9999) {
           const data = await resp.json();
           models = (data.data || []).map(m => ({ id: m.id, name: m.id }));
         }
-      } else if (provName === 'openrouter') {
-        const resp = await fetch('https://openrouter.ai/api/v1/models', { signal: AbortSignal.timeout(8000) });
-        if (resp.ok) {
-          const data = await resp.json();
-          const free = (data.data || []).filter(m =>
-            m.id.includes(':free') || m.id === 'openrouter/free' || m.id === 'openrouter/auto' ||
-            (m.pricing && m.pricing.prompt === '0' && m.pricing.completion === '0')
-          );
-          models = free.map(m => ({ id: m.id, name: m.name || m.id }));
+      } else {
+        // Cloud providers — use listModels() if available on the provider class
+        const reg = PROVIDER_REGISTRY[provName];
+        if (reg && row.api_key) {
+          try {
+            const provider = createProvider(provName, row.api_key, row.model, row.base_url);
+            if (typeof provider.listModels === 'function') {
+              const result = await provider.listModels();
+              if (result && result.groups) {
+                // Provider returns grouped models (e.g. OpenRouter free/premium)
+                groups = result.groups;
+                models = Object.values(result.groups).flat().map(id => ({ id, name: id }));
+              } else if (Array.isArray(result)) {
+                models = result.map(id => ({ id, name: id }));
+              }
+            }
+          } catch (err) {
+            // If dynamic fetch fails, fall back to static list
+            console.log(`[models] Dynamic fetch failed for ${provName}: ${err.message}`);
+          }
+        }
+        // Fall back to static registry models if dynamic returned nothing
+        if (models.length === 0 && reg) {
+          models = (reg.models || []).map(id => ({ id, name: id }));
         }
       }
 
-      res.json({ models, provider: provName });
+      res.json({ models, groups, provider: provName });
     } catch (err) {
       res.json({ models: [], error: err.message, provider: req.params.name });
     }
