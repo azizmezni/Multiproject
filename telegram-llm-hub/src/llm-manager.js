@@ -232,6 +232,8 @@ class LLMManager {
     });
     tx();
     this.clearCache(userId, name);
+    // Clear lastUsedProvider so the widget shows the newly selected provider
+    this.lastUsedProvider.delete(userId);
   }
 
   reorderProvider(userId, name, direction) {
