@@ -1,5 +1,5 @@
 import { safeSend } from '../bot-helpers.js';
-import kb from '../keyboards.js';
+import { kb } from '../keyboards.js';
 
 export function registerSocial(bot, shared) {
   const { memory, arena, challenges, costTracker, gamification, templates, vault, collaboration, sessions, llm } = shared;
