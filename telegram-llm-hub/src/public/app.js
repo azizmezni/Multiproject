@@ -3561,6 +3561,7 @@ async function renderGitRepos(el) {
             </div>
             <div style="display:flex;flex-direction:column;gap:4px;align-items:flex-end;margin-left:8px">
               <span style="font-size:10px;padding:2px 8px;border-radius:4px;background:var(--${statusColors[r.status] || 'blue'});color:#000;font-weight:600">${r._running ? '● Running' : r.status}</span>
+              ${r._running && (r._port || r.port) ? `<a href="http://localhost:${r._port || r.port}" target="_blank" style="font-size:11px;color:var(--cyan);text-decoration:none" onclick="event.stopPropagation()">🌐 localhost:${r._port || r.port}</a>` : ''}
               <div style="display:flex;gap:4px">
                 <button class="btn" style="font-size:11px;padding:2px 8px;background:${r._running ? 'var(--red)' : 'var(--green)'};color:#000" onclick="event.stopPropagation();toggleGitRepo(${r.id},${r._running})">${r._running ? '⏹' : '▶️'}</button>
                 <button class="btn" style="font-size:11px;padding:2px 8px;background:var(--surface2)" onclick="event.stopPropagation();deleteGitRepo(${r.id})">🗑</button>
@@ -3606,7 +3607,8 @@ async function viewGitRepo(id) {
         <h3 style="color:var(--cyan);margin-bottom:12px">⚡ Actions</h3>
         <div style="display:flex;flex-wrap:wrap;gap:8px">
           ${repo._running
-            ? `<button class="btn" style="background:var(--red);color:#000" onclick="toggleGitRepo(${id},true)">⏹ Stop</button>`
+            ? `<button class="btn" style="background:var(--red);color:#000" onclick="toggleGitRepo(${id},true)">⏹ Stop</button>
+               ${repo._port || repo.port ? `<a href="http://localhost:${repo._port || repo.port}" target="_blank" class="btn" style="background:var(--cyan);color:#000;text-decoration:none">🌐 Open :${repo._port || repo.port}</a>` : ''}`
             : `<button class="btn" style="background:var(--green);color:#000" onclick="toggleGitRepo(${id},false)">▶️ Run</button>`
           }
           <button class="btn" style="background:var(--purple);color:#000" onclick="pullGitRepo(${id})">🔄 Git Pull</button>

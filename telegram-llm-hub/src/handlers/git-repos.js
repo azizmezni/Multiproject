@@ -4,9 +4,85 @@ import { existsSync } from 'fs';
 import { spawn } from 'child_process';
 import { safeSend, stripMd } from '../bot-helpers.js';
 import { gitRepoManager, analyzeRepo, generateRunPlan, diagnoseStepFailure } from '../git-repos.js';
+import { matchKnownError, isStepSkippable } from '../smart-fix.js';
 
 const __handlerDir = dirname(fileURLToPath(import.meta.url));
 const REPOS_DIR = join(__handlerDir, '..', '..', 'repos');
+
+// Port detection regex — matches common server output patterns
+const PORT_RE = /(?:listening|started|running|server|serving|open|available|ready)\s+(?:on|at)\s+(?:https?:\/\/)?(?:localhost|127\.0\.0\.1|0\.0\.0\.0)[:\s]+(\d{3,5})|(?:port|PORT)\s*[=:]\s*(\d{3,5})|localhost:(\d{3,5})|127\.0\.0\.1:(\d{3,5})|0\.0\.0\.0:(\d{3,5})/i;
+
+function detectPort(output) {
+  const m = output.match(PORT_RE);
+  if (!m) return null;
+  return m[1] || m[2] || m[3] || m[4] || m[5];
+}
+
+/**
+ * Spawn the final "run" step as a background server process.
+ * Watches stdout/stderr for ~8s to detect port or crash.
+ */
+function spawnServerStep(cmd, repo, runningGitRepos, ctx) {
+  return new Promise((resolve) => {
+    const proc = spawn(cmd, {
+      cwd: repo.clone_dir, shell: true,
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: process.env,
+    });
+
+    let output = '';
+    let detectedPort = null;
+    let crashed = false;
+
+    const collect = (data) => {
+      output += data.toString();
+      if (!detectedPort) {
+        detectedPort = detectPort(output);
+      }
+    };
+
+    proc.stdout?.on('data', collect);
+    proc.stderr?.on('data', collect);
+
+    proc.on('close', (code) => {
+      if (code !== 0 && !detectedPort) {
+        crashed = true;
+        resolve({ ok: false, output });
+      }
+    });
+
+    proc.on('error', (err) => {
+      crashed = true;
+      resolve({ ok: false, output: err.message });
+    });
+
+    // Try stdin close
+    try { proc.stdin.end(); } catch {}
+
+    // Store the process
+    runningGitRepos.set(repo.id, proc);
+
+    // Wait up to 8 seconds for port detection or crash
+    let checks = 0;
+    const interval = setInterval(() => {
+      checks++;
+      if (crashed) {
+        clearInterval(interval);
+        return; // already resolved
+      }
+      if (detectedPort) {
+        clearInterval(interval);
+        resolve({ ok: true, port: detectedPort });
+        return;
+      }
+      if (checks >= 16) { // 8 seconds (16 × 500ms)
+        clearInterval(interval);
+        // Process is still alive but no port detected — still OK (could be a non-server process)
+        resolve({ ok: true, port: null });
+      }
+    }, 500);
+  });
+}
 
 export function registerGitRepos(bot, shared) {
   const { llm, userState, qa, kb } = shared;
@@ -166,13 +242,15 @@ export function registerGitRepos(bot, shared) {
     plan.steps.forEach((s, i) => { planMsg += `${i + 1}. ${stripMd(s.label)}: \`${s.cmd}\`\n`; });
     await safeSend(ctx, planMsg);
 
-    // Step 2: Execute each step sequentially (unlimited fix attempts)
+    // Step 2: Execute each step with smart fix engine
     let lastStepOk = true;
     let lastError = '';
+    let skippedSteps = [];
 
     for (let i = 0; i < plan.steps.length; i++) {
       const step = plan.steps[i];
       const isLastStep = i === plan.steps.length - 1;
+      const skippable = isStepSkippable(step, isLastStep);
       await ctx.reply(`⚡ Step ${i + 1}/${plan.steps.length}: ${step.label}\n> \`${step.cmd}\``);
 
       let fixAttempts = 0;
@@ -182,8 +260,25 @@ export function registerGitRepos(bot, shared) {
       const seenErrors = new Map();
 
       while (true) {
-        const timeout = isLastStep ? 30000 : 120000;
-        const result = await qa.runCommand(currentCmd, repo.clone_dir, timeout);
+        // For the final step (likely a server), spawn as background and detect port
+        if (isLastStep) {
+          const serverResult = await spawnServerStep(currentCmd, repo, runningGitRepos, ctx);
+          if (serverResult.ok) {
+            succeeded = true;
+            if (serverResult.port) {
+              gitRepoManager.update(repo.id, { status: 'running', port: parseInt(serverResult.port) });
+              const link = `http://localhost:${serverResult.port}`;
+              await ctx.reply(`✅ Server running!\n\n🌐 *${stripMd(repo.name)}*: [${link}](${link})`, { parse_mode: 'Markdown', disable_web_page_preview: true });
+            } else {
+              await ctx.reply('✅ Process started (no port detected)');
+            }
+            break;
+          }
+          // If server crashed immediately, fall through to error handling
+        }
+
+        const timeout = isLastStep ? 15000 : 120000;
+        const result = isLastStep ? { ok: false, stderr: 'Server failed to start', stdout: '', code: -1 } : await qa.runCommand(currentCmd, repo.clone_dir, timeout);
 
         if (result.ok) {
           const out = (result.stdout || '').substring(0, 500);
@@ -193,7 +288,7 @@ export function registerGitRepos(bot, shared) {
           break;
         }
 
-        // Step failed — check for repeated errors
+        // Step failed
         const errOutput = (result.stderr || result.stdout || 'Unknown error').substring(0, 2000);
         lastError = errOutput;
         const errKey = errOutput.substring(0, 200).trim();
@@ -201,12 +296,50 @@ export function registerGitRepos(bot, shared) {
         seenErrors.set(errKey, errCount);
         fixAttempts++;
 
+        // --- Phase 1: Try known error patterns first (no LLM needed) ---
+        if (fixAttempts === 1) {
+          const knownFix = matchKnownError(errOutput);
+          if (knownFix) {
+            await ctx.reply(`🔍 Known issue: ${knownFix.diagnosis}`);
+
+            if (knownFix.unfixable_reason) {
+              await ctx.reply(`🛑 ${knownFix.unfixable_reason}`);
+              if (skippable) {
+                await ctx.reply(`⏭ Skipping non-critical step and continuing...`);
+                skippedSteps.push(step.label);
+              }
+              break;
+            }
+
+            for (const fc of (knownFix.fix_commands || [])) {
+              await ctx.reply(`> \`${fc}\``);
+              await qa.runCommand(fc, repo.clone_dir, 60000);
+            }
+            if (knownFix.retry_cmd) {
+              currentCmd = knownFix.retry_cmd;
+              await ctx.reply(`🔧 Retrying with: \`${currentCmd}\``);
+            }
+            continue;
+          }
+        }
+
+        // --- Phase 2: LLM fix (with limits) ---
         if (errCount >= 3) {
-          await ctx.reply(`🛑 Same error repeated ${errCount} times — LLM cannot fix this. Skipping step.`);
+          if (skippable) {
+            await ctx.reply(`⏭ Same error 3x on non-critical step — skipping and continuing...`);
+            skippedSteps.push(step.label);
+          } else {
+            await ctx.reply(`🛑 Same error repeated ${errCount} times — cannot auto-fix.`);
+          }
           break;
         }
-        if (fixAttempts > 10) {
-          await ctx.reply(`🛑 Too many fix attempts (${fixAttempts}). Giving up on this step.`);
+        if (fixAttempts > 5) {
+          if (skippable) {
+            await ctx.reply(`⏭ Too many attempts on non-critical step — skipping...`);
+            skippedSteps.push(step.label);
+          } else {
+            await ctx.reply(`🛑 ${fixAttempts} fix attempts failed. Giving up on this step.`);
+          }
           break;
         }
 
@@ -218,7 +351,12 @@ export function registerGitRepos(bot, shared) {
           await ctx.reply(`🔧 ${fix.diagnosis || 'Fixing...'}`);
 
           if (fix.give_up) {
-            await ctx.reply(`🛑 LLM says this is unfixable: ${fix.diagnosis}`);
+            if (skippable) {
+              await ctx.reply(`⏭ LLM says unfixable — skipping non-critical step: ${fix.diagnosis}`);
+              skippedSteps.push(step.label);
+            } else {
+              await ctx.reply(`🛑 LLM says this is unfixable: ${fix.diagnosis}`);
+            }
             break;
           }
 
@@ -236,13 +374,19 @@ export function registerGitRepos(bot, shared) {
           }
         } catch (fixErr) {
           await ctx.reply(`⚠️ LLM fix failed: ${fixErr.message}`);
+          if (skippable) {
+            await ctx.reply(`⏭ Skipping non-critical step...`);
+            skippedSteps.push(step.label);
+            break;
+          }
         }
       }
 
-      if (!succeeded) {
+      if (!succeeded && !skippable) {
         lastStepOk = false;
         break;
       }
+      // If skippable step failed, keep going to next step
     }
 
     // Save the run/install commands from the plan for future use
@@ -250,12 +394,13 @@ export function registerGitRepos(bot, shared) {
     if (plan.install_cmd) gitRepoManager.update(repo.id, { install_cmd: plan.install_cmd });
 
     const updatedRepo = gitRepoManager.get(repo.id);
+    const skipNote = skippedSteps.length > 0 ? `\n\n⏭ Skipped steps: ${skippedSteps.map(s => `_${stripMd(s)}_`).join(', ')}` : '';
     if (lastStepOk) {
       gitRepoManager.update(repo.id, { status: 'cloned' });
-      await safeSend(ctx, `✅ *${stripMd(repo.name)}* executed successfully!`, kb.gitRepoView(updatedRepo.id, updatedRepo));
+      await safeSend(ctx, `✅ *${stripMd(repo.name)}* executed successfully!${skipNote}`, kb.gitRepoView(updatedRepo.id, updatedRepo));
     } else {
       gitRepoManager.update(repo.id, { status: 'error' });
-      await safeSend(ctx, `❌ *${stripMd(repo.name)}* failed.\n\nLast error:\n\`\`\`\n${lastError.substring(0, 800)}\n\`\`\``, kb.gitRepoView(updatedRepo.id, updatedRepo));
+      await safeSend(ctx, `❌ *${stripMd(repo.name)}* failed.\n\nLast error:\n\`\`\`\n${lastError.substring(0, 800)}\n\`\`\`${skipNote}`, kb.gitRepoView(updatedRepo.id, updatedRepo));
     }
   });
 

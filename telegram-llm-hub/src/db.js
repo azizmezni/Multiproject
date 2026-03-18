@@ -385,4 +385,9 @@ try { db.prepare("SELECT execution FROM arena_battles LIMIT 0").get(); } catch {
   db.exec("ALTER TABLE arena_battles ADD COLUMN execution TEXT DEFAULT ''");
 }
 
+// Port column for git_repos (detected when server starts)
+try { db.prepare("SELECT port FROM git_repos LIMIT 0").get(); } catch {
+  db.exec("ALTER TABLE git_repos ADD COLUMN port INTEGER DEFAULT NULL");
+}
+
 export default db;
