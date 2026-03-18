@@ -71,61 +71,95 @@
       <button class="nav-btn active" data-section="home" onclick="showSection('home')">
         <span class="nav-icon">🏠</span><span class="nav-label">Home</span>
       </button>
-      <button class="nav-btn" data-section="providers" onclick="showSection('providers')">
-        <span class="nav-icon">🔧</span><span class="nav-label">Providers</span>
-      </button>
-      <button class="nav-btn" data-section="boards" onclick="showSection('boards')">
-        <span class="nav-icon">🚀</span><span class="nav-label">Projects</span>
-      </button>
-      <button class="nav-btn" data-section="workflows" onclick="showSection('workflows')">
-        <span class="nav-icon">🔀</span><span class="nav-label">Workflows</span>
-      </button>
-      <button class="nav-btn" data-section="drafts" onclick="showSection('drafts')">
-        <span class="nav-icon">📥</span><span class="nav-label">Drafts</span>
-      </button>
-      <button class="nav-btn" data-section="gitrepos" onclick="showSection('gitrepos')">
-        <span class="nav-icon">📚</span><span class="nav-label">Git Repos</span>
-      </button>
-      <button class="nav-btn" data-section="projects" onclick="showSection('projects')">
-        <span class="nav-icon">🚀</span><span class="nav-label">Projects</span>
-      </button>
-      <button class="nav-btn" data-section="chat" onclick="showSection('chat')">
-        <span class="nav-icon">💬</span><span class="nav-label">Chat</span>
-      </button>
-      <div class="nav-divider"></div>
-      <button class="nav-btn" data-section="templates" onclick="showSection('templates')">
-        <span class="nav-icon">🏪</span><span class="nav-label">Templates</span>
-      </button>
-      <button class="nav-btn" data-section="arena" onclick="showSection('arena')">
-        <span class="nav-icon">⚔️</span><span class="nav-label">Arena</span>
-      </button>
-      <button class="nav-btn" data-section="memory" onclick="showSection('memory')">
-        <span class="nav-icon">🧠</span><span class="nav-label">Memory</span>
-      </button>
-      <button class="nav-btn" data-section="challenges" onclick="showSection('challenges')">
-        <span class="nav-icon">🎯</span><span class="nav-label">Challenges</span>
-      </button>
-      <button class="nav-btn" data-section="leaderboard" onclick="showSection('leaderboard')">
-        <span class="nav-icon">🏆</span><span class="nav-label">Leaderboard</span>
-      </button>
-      <button class="nav-btn" data-section="collaboration" onclick="showSection('collaboration')">
-        <span class="nav-icon">🤝</span><span class="nav-label">Collab</span>
-      </button>
-      <button class="nav-btn" data-section="costs" onclick="showSection('costs')">
-        <span class="nav-icon">💰</span><span class="nav-label">Costs</span>
-      </button>
-      <button class="nav-btn" data-section="vault" onclick="showSection('vault')">
-        <span class="nav-icon">🔐</span><span class="nav-label">Vault</span>
-      </button>
-      <button class="nav-btn" data-section="plugins" onclick="showSection('plugins')">
-        <span class="nav-icon">🔌</span><span class="nav-label">Plugins</span>
-      </button>
-      <button class="nav-btn" data-section="selfimprove" onclick="showSection('selfimprove')">
-        <span class="nav-icon">🧬</span><span class="nav-label">Self-Improve</span>
-      </button>
-      <button class="nav-btn" data-section="achievements" onclick="showSection('achievements')">
-        <span class="nav-icon">🏅</span><span class="nav-label">Achievements</span>
-      </button>
+
+      <!-- AI Engine -->
+      <div class="nav-category" onclick="toggleCategory(this)">
+        <span class="cat-icon">⚡</span><span class="cat-label">AI Engine</span><span class="cat-arrow">▾</span>
+      </div>
+      <div class="nav-group open">
+        <button class="nav-btn" data-section="providers" onclick="showSection('providers')">
+          <span class="nav-icon">🔧</span><span class="nav-label">Providers</span>
+        </button>
+        <button class="nav-btn" data-section="chat" onclick="showSection('chat')">
+          <span class="nav-icon">💬</span><span class="nav-label">Chat</span>
+        </button>
+        <button class="nav-btn" data-section="arena" onclick="showSection('arena')">
+          <span class="nav-icon">🏛️</span><span class="nav-label">Congress</span>
+        </button>
+        <button class="nav-btn" data-section="memory" onclick="showSection('memory')">
+          <span class="nav-icon">🧠</span><span class="nav-label">Memory</span>
+        </button>
+      </div>
+
+      <!-- Dev Tools -->
+      <div class="nav-category" onclick="toggleCategory(this)">
+        <span class="cat-icon">🛠️</span><span class="cat-label">Dev Tools</span><span class="cat-arrow">▾</span>
+      </div>
+      <div class="nav-group open">
+        <button class="nav-btn" data-section="boards" onclick="showSection('boards')">
+          <span class="nav-icon">📋</span><span class="nav-label">Boards</span>
+        </button>
+        <button class="nav-btn" data-section="workflows" onclick="showSection('workflows')">
+          <span class="nav-icon">🔀</span><span class="nav-label">Workflows</span>
+        </button>
+        <button class="nav-btn" data-section="gitrepos" onclick="showSection('gitrepos')">
+          <span class="nav-icon">📚</span><span class="nav-label">Git Repos</span>
+        </button>
+        <button class="nav-btn" data-section="projects" onclick="showSection('projects')">
+          <span class="nav-icon">🚀</span><span class="nav-label">Projects</span>
+        </button>
+        <button class="nav-btn" data-section="drafts" onclick="showSection('drafts')">
+          <span class="nav-icon">📥</span><span class="nav-label">Drafts</span>
+        </button>
+        <button class="nav-btn" data-section="selfimprove" onclick="showSection('selfimprove')">
+          <span class="nav-icon">🧬</span><span class="nav-label">Self-Improve</span>
+        </button>
+      </div>
+
+      <!-- Marketplace -->
+      <div class="nav-category" onclick="toggleCategory(this)">
+        <span class="cat-icon">📦</span><span class="cat-label">Marketplace</span><span class="cat-arrow">▾</span>
+      </div>
+      <div class="nav-group open">
+        <button class="nav-btn" data-section="templates" onclick="showSection('templates')">
+          <span class="nav-icon">🏪</span><span class="nav-label">Templates</span>
+        </button>
+        <button class="nav-btn" data-section="plugins" onclick="showSection('plugins')">
+          <span class="nav-icon">🔌</span><span class="nav-label">Plugins</span>
+        </button>
+        <button class="nav-btn" data-section="collaboration" onclick="showSection('collaboration')">
+          <span class="nav-icon">🤝</span><span class="nav-label">Collab</span>
+        </button>
+      </div>
+
+      <!-- Gamification -->
+      <div class="nav-category" onclick="toggleCategory(this)">
+        <span class="cat-icon">🎮</span><span class="cat-label">Gamification</span><span class="cat-arrow">▾</span>
+      </div>
+      <div class="nav-group open">
+        <button class="nav-btn" data-section="challenges" onclick="showSection('challenges')">
+          <span class="nav-icon">🎯</span><span class="nav-label">Challenges</span>
+        </button>
+        <button class="nav-btn" data-section="achievements" onclick="showSection('achievements')">
+          <span class="nav-icon">🏅</span><span class="nav-label">Achievements</span>
+        </button>
+        <button class="nav-btn" data-section="leaderboard" onclick="showSection('leaderboard')">
+          <span class="nav-icon">🏆</span><span class="nav-label">Leaderboard</span>
+        </button>
+      </div>
+
+      <!-- System -->
+      <div class="nav-category" onclick="toggleCategory(this)">
+        <span class="cat-icon">⚙️</span><span class="cat-label">System</span><span class="cat-arrow">▾</span>
+      </div>
+      <div class="nav-group open">
+        <button class="nav-btn" data-section="costs" onclick="showSection('costs')">
+          <span class="nav-icon">💰</span><span class="nav-label">Costs</span>
+        </button>
+        <button class="nav-btn" data-section="vault" onclick="showSection('vault')">
+          <span class="nav-icon">🔐</span><span class="nav-label">Vault</span>
+        </button>
+      </div>
     </nav>
 
     <!-- Content Area -->

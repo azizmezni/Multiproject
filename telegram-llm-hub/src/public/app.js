@@ -43,6 +43,15 @@ document.addEventListener('DOMContentLoaded', async () => {
   showSection('home');
 });
 
+// Sidebar category collapse/expand
+function toggleCategory(el) {
+  el.classList.toggle('collapsed');
+  const group = el.nextElementSibling;
+  if (group && group.classList.contains('nav-group')) {
+    group.classList.toggle('collapsed');
+  }
+}
+
 async function refreshAll() {
   try {
     const results = await Promise.allSettled([
@@ -89,8 +98,8 @@ function updateHeader() {
 function updateActiveProviderWidget() {
   const providers = state.providers || [];
   const enabled = providers.filter(p => p.enabled);
-  // Primary = first enabled provider with a key (or local) — what would be tried first
-  const primary = enabled.find(p => p.api_key || p.is_local) || enabled[0];
+  // Primary = first enabled provider by priority (what would be tried first)
+  const primary = enabled[0];
   // lastUsed = the provider that actually handled the last LLM call (may differ due to fallback)
   const lastUsed = state.lastUsedProvider;
   const nameEl = document.getElementById('apw-name');
