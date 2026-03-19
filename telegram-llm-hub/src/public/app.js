@@ -3585,44 +3585,94 @@ async function viewGitRepo(id) {
   const el = document.getElementById('content');
   const typeNames = { node: '🟢 Node.js', python: '🐍 Python', rust: '🦀 Rust', go: '🔵 Go', unknown: '📦 Unknown' };
 
+  const portNum = repo._port || repo.port;
+  const runningBadge = repo._running
+    ? `<span style="display:inline-flex;align-items:center;gap:6px;padding:4px 12px;background:rgba(34,197,94,0.15);border:1px solid var(--green);border-radius:20px;font-size:12px;color:var(--green);font-weight:600">
+        <span style="width:8px;height:8px;border-radius:50%;background:var(--green);animation:pulse 1.5s infinite"></span> Running${portNum ? ` on :${portNum}` : ''}
+       </span>`
+    : `<span style="padding:4px 12px;background:rgba(148,163,184,0.1);border:1px solid var(--border);border-radius:20px;font-size:12px;color:var(--text2)">● Stopped</span>`;
+
   el.innerHTML = `
     <div class="section-title">
       <span class="icon">📚</span> ${escapeHtml(repo.name)}
       <button class="btn" style="font-size:12px;margin-left:auto" onclick="renderGitRepos(document.getElementById('content'))">◀️ Back</button>
     </div>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
-      <div class="card">
-        <h3 style="color:var(--cyan);margin-bottom:12px">ℹ️ Info</h3>
-        <div style="font-size:13px;color:var(--text2);line-height:1.8">
-          <div>🔗 <a href="${escapeHtml(repo.url)}" target="_blank" style="color:var(--cyan)">${escapeHtml(repo.url)}</a></div>
-          <div>📦 Type: ${typeNames[repo.project_type] || repo.project_type}</div>
-          <div>▶️ Run: <code style="background:var(--surface2);padding:2px 6px;border-radius:3px">${escapeHtml(repo.run_cmd || 'N/A')}</code></div>
-          <div>📥 Install: <code style="background:var(--surface2);padding:2px 6px;border-radius:3px">${escapeHtml(repo.install_cmd || 'N/A')}</code></div>
-          ${repo.readme_summary ? `<div style="margin-top:8px">📝 ${escapeHtml(repo.readme_summary)}</div>` : ''}
-          ${repo.skills.length > 0 ? `<div style="margin-top:8px">🧠 Skills: ${repo.skills.map(s => `<span style="font-size:11px;padding:2px 8px;background:rgba(99,102,241,0.2);color:var(--purple);border-radius:4px;margin:2px">${escapeHtml(s)}</span>`).join(' ')}</div>` : ''}
-          <div style="font-size:11px;color:var(--text3);margin-top:8px">📁 ${escapeHtml(repo.clone_dir)}</div>
+
+    <!-- Introduction Card -->
+    <div class="card" style="border-left:3px solid var(--cyan);padding:20px 24px">
+      <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:16px">
+        <div style="flex:1">
+          <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+            <span style="font-size:24px">${typeNames[repo.project_type]?.split(' ')[0] || '📦'}</span>
+            <div>
+              <h2 style="font-size:20px;font-weight:700;color:var(--text1);margin:0">${escapeHtml(repo.name)}</h2>
+              <a href="${escapeHtml(repo.url)}" target="_blank" style="font-size:11px;color:var(--text3);text-decoration:none">${escapeHtml(repo.url)}</a>
+            </div>
+            ${runningBadge}
+          </div>
+          ${repo.readme_summary ? `<p style="font-size:14px;color:var(--text2);margin:10px 0 0;line-height:1.5">📝 ${escapeHtml(repo.readme_summary)}</p>` : ''}
+          ${(repo.skills || []).length > 0 ? `<div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:10px">${repo.skills.map(s => `<span style="font-size:10px;padding:3px 8px;background:rgba(99,102,241,0.15);color:var(--purple);border-radius:12px;border:1px solid rgba(99,102,241,0.2)">${escapeHtml(s)}</span>`).join('')}</div>` : ''}
+        </div>
+        <div style="display:flex;flex-direction:column;gap:6px;align-items:flex-end;flex-shrink:0">
+          ${repo._running
+            ? `<button class="btn" style="background:var(--red);color:#fff;font-size:14px;padding:10px 24px;font-weight:700" onclick="toggleGitRepo(${id},true)">⏹ Stop</button>
+               ${portNum ? `<a href="http://localhost:${portNum}" target="_blank" class="btn" style="background:var(--cyan);color:#000;text-decoration:none;font-size:13px;padding:8px 20px;font-weight:600">🌐 Open localhost:${portNum}</a>` : ''}`
+            : `<button class="btn" style="background:var(--green);color:#000;font-size:14px;padding:10px 24px;font-weight:700" onclick="toggleGitRepo(${id},false)">▶️ Run Project</button>`
+          }
         </div>
       </div>
+    </div>
+
+    <!-- How to Run + Actions -->
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:16px">
+      <div class="card">
+        <h3 style="color:var(--cyan);margin-bottom:12px">🖥️ How to Run</h3>
+        <div style="font-size:13px;color:var(--text2);line-height:2">
+          <div style="display:flex;align-items:center;gap:8px">
+            <span style="font-size:10px;padding:2px 8px;background:var(--purple);color:#fff;border-radius:4px;font-weight:700">1</span>
+            <span>Open terminal in:</span>
+          </div>
+          <code style="display:block;background:var(--surface2);padding:8px 12px;border-radius:6px;margin:4px 0 8px 28px;font-size:12px;color:var(--text1);cursor:pointer;user-select:all" title="Click to copy">${escapeHtml(repo.clone_dir)}</code>
+
+          ${repo.install_cmd ? `
+          <div style="display:flex;align-items:center;gap:8px">
+            <span style="font-size:10px;padding:2px 8px;background:var(--purple);color:#fff;border-radius:4px;font-weight:700">2</span>
+            <span>Install dependencies:</span>
+          </div>
+          <code style="display:block;background:var(--surface2);padding:8px 12px;border-radius:6px;margin:4px 0 8px 28px;font-size:12px;color:var(--green);cursor:pointer;user-select:all" title="Click to copy">${escapeHtml(repo.install_cmd)}</code>
+          ` : ''}
+
+          <div style="display:flex;align-items:center;gap:8px">
+            <span style="font-size:10px;padding:2px 8px;background:var(--purple);color:#fff;border-radius:4px;font-weight:700">${repo.install_cmd ? '3' : '2'}</span>
+            <span>Run the project:</span>
+          </div>
+          <code style="display:block;background:var(--surface2);padding:8px 12px;border-radius:6px;margin:4px 0 8px 28px;font-size:12px;color:var(--green);cursor:pointer;user-select:all" title="Click to copy">${escapeHtml(repo.run_cmd || 'N/A')}</code>
+        </div>
+        <div style="display:flex;gap:8px;margin-top:12px">
+          <button class="btn" style="background:var(--cyan);color:#000;font-size:12px" onclick="openGitRepoTerminal(${id})">🖥️ Open Terminal</button>
+          <button class="btn" style="background:var(--yellow);color:#000;font-size:12px" onclick="openGitRepoFolder(${id})">📂 Open Folder</button>
+        </div>
+      </div>
+
       <div class="card" id="git-actions-card">
         <h3 style="color:var(--cyan);margin-bottom:12px">⚡ Actions</h3>
         <div style="display:flex;flex-wrap:wrap;gap:8px">
-          ${repo._running
-            ? `<button class="btn" style="background:var(--red);color:#000" onclick="toggleGitRepo(${id},true)">⏹ Stop</button>
-               ${repo._port || repo.port ? `<a href="http://localhost:${repo._port || repo.port}" target="_blank" class="btn" style="background:var(--cyan);color:#000;text-decoration:none">🌐 Open :${repo._port || repo.port}</a>` : ''}`
-            : `<button class="btn" style="background:var(--green);color:#000" onclick="toggleGitRepo(${id},false)">▶️ Run</button>`
-          }
           <button class="btn" style="background:var(--purple);color:#000" onclick="pullGitRepo(${id})">🔄 Git Pull</button>
           <button class="btn" style="background:var(--orange,#f97316);color:#000" onclick="reanalyzeGitRepo(${id})">🔍 Re-analyze</button>
-          <button class="btn" style="background:var(--cyan);color:#000" onclick="openGitRepoTerminal(${id})">🖥️ Terminal</button>
-          <button class="btn" style="background:var(--yellow);color:#000" onclick="openGitRepoFolder(${id})">📂 Folder</button>
           <button class="btn" style="background:var(--red);color:#000" onclick="deleteGitRepo(${id})">🗑 Delete</button>
         </div>
-        ${repo._running && repo._port ? `<div style="margin-top:12px;font-size:12px;color:var(--green)">● Running on port ${repo._port}</div>` : ''}
+        <div style="margin-top:16px;font-size:13px;color:var(--text2);line-height:1.8">
+          <div>📦 Type: ${typeNames[repo.project_type] || repo.project_type}</div>
+          <div style="font-size:11px;color:var(--text3);margin-top:4px">📁 ${escapeHtml(repo.clone_dir)}</div>
+          <div style="font-size:11px;color:var(--text3)">📅 Cloned: ${new Date(repo.created_at).toLocaleDateString()}</div>
+        </div>
       </div>
     </div>
+
+    <!-- Logs -->
     <div class="card" style="margin-top:16px">
       <h3 style="color:var(--cyan);margin-bottom:12px">📋 Logs</h3>
-      <pre id="git-run-logs" style="background:var(--surface1);color:var(--text2);padding:12px;border-radius:8px;max-height:400px;overflow:auto;font-size:12px;white-space:pre-wrap;word-break:break-word">Click Run to start the project...</pre>
+      <pre id="git-run-logs" style="background:var(--surface1);color:var(--text2);padding:12px;border-radius:8px;max-height:400px;overflow:auto;font-size:12px;white-space:pre-wrap;word-break:break-word">${repo._running ? 'Loading logs...' : 'Click ▶️ Run Project to start'}</pre>
     </div>`;
 
   // Load existing logs and start polling
