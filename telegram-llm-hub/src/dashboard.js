@@ -1713,22 +1713,28 @@ CRITICAL RULES:
     if (!repo?.clone_dir) return res.status(400).json({ error: 'No clone dir' });
     try {
       if (isWindows) {
+        // Escape batch special chars for echo
+        const esc = (s) => (s || '').replace(/([&|<>^()"%!])/g, '^$1');
         const { writeFile: wf } = await import('fs/promises');
         const batPath = join(repo.clone_dir, '_hub_terminal.bat');
         const lines = [
           '@echo off',
+          `title ${esc(repo.name)} - LLM Hub`,
           `cd /d "${repo.clone_dir}"`,
-          'echo ========================================',
-          `echo   ${repo.name}`,
-          'echo ========================================',
-          repo.install_cmd ? `echo   Install: ${repo.install_cmd}` : '',
-          repo.run_cmd ? `echo   Run:     ${repo.run_cmd}` : '',
-          'echo ========================================',
-          'echo.',
-          'cmd /k',
+          'echo:',
+          'echo  ========================================',
+          `echo   ${esc(repo.name)}`,
+          'echo  ========================================',
+          repo.install_cmd ? `echo   Install: ${esc(repo.install_cmd)}` : '',
+          repo.run_cmd ? `echo   Run:     ${esc(repo.run_cmd)}` : '',
+          'echo  ========================================',
+          'echo:',
+          'echo  Type the commands above to get started.',
+          'echo:',
         ].filter(Boolean).join('\r\n');
         await wf(batPath, lines);
-        execCb(`start "" "${batPath}"`, { cwd: repo.clone_dir, windowsHide: false },
+        // Use cmd /k to run bat AND keep terminal open after
+        execCb(`start "" cmd /k "${batPath}"`, { cwd: repo.clone_dir, windowsHide: false },
           (err) => { if (err) console.log('[git-terminal] error:', err.message); });
       } else if (process.platform === 'darwin') {
         execCb(`open -a Terminal "${repo.clone_dir}"`);
