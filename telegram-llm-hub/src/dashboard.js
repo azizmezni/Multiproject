@@ -1707,16 +1707,28 @@ CRITICAL RULES:
     }
   });
 
-  // Open terminal for git repo
-  app.post('/api/git-repos/:id/open-terminal', (req, res) => {
+  // Open terminal for git repo — writes a temp .bat so quoting never breaks
+  app.post('/api/git-repos/:id/open-terminal', async (req, res) => {
     const repo = gitRepoManager.get(parseInt(req.params.id));
     if (!repo?.clone_dir) return res.status(400).json({ error: 'No clone dir' });
     try {
       if (isWindows) {
-        const safeTitle = repo.name.replace(/[&|<>^"]/g, '');
-        const cmd = repo.run_cmd || 'echo Ready';
-        execCb(`start "${safeTitle}" cmd.exe /k "cd /d ${repo.clone_dir} && ${cmd}"`,
-          { cwd: repo.clone_dir, windowsHide: false },
+        const { writeFile: wf } = await import('fs/promises');
+        const batPath = join(repo.clone_dir, '_hub_terminal.bat');
+        const lines = [
+          '@echo off',
+          `cd /d "${repo.clone_dir}"`,
+          'echo ========================================',
+          `echo   ${repo.name}`,
+          'echo ========================================',
+          repo.install_cmd ? `echo   Install: ${repo.install_cmd}` : '',
+          repo.run_cmd ? `echo   Run:     ${repo.run_cmd}` : '',
+          'echo ========================================',
+          'echo.',
+          'cmd /k',
+        ].filter(Boolean).join('\r\n');
+        await wf(batPath, lines);
+        execCb(`start "" "${batPath}"`, { cwd: repo.clone_dir, windowsHide: false },
           (err) => { if (err) console.log('[git-terminal] error:', err.message); });
       } else if (process.platform === 'darwin') {
         execCb(`open -a Terminal "${repo.clone_dir}"`);
