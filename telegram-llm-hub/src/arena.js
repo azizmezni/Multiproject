@@ -48,7 +48,7 @@ export const arena = {
 
     // Get ALL enabled providers with keys (or local)
     const rows = db.prepare(
-      'SELECT name, display_name FROM providers WHERE user_id = ? AND enabled = 1 AND (api_key IS NOT NULL AND api_key != "" OR is_local = 1) ORDER BY priority'
+      "SELECT name, display_name FROM providers WHERE user_id = ? AND enabled = 1 AND (api_key IS NOT NULL AND api_key != '' OR is_local = 1) ORDER BY priority"
     ).all(userId);
     const providerNames = rows.map(p => p.name);
     const providerDisplayNames = {};

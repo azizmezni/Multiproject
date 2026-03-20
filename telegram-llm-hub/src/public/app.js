@@ -222,8 +222,13 @@ async function renderProviders(el) {
   await refreshAll();
   const providers = state.providers;
   const registry = state.registry;
-  const cloud = providers.filter(p => !p.is_local);
+
+  // Categorize providers
+  const free = providers.filter(p => { const r = registry.find(x => x.name === p.name); return r && r.free && !p.is_local; });
+  const paid = providers.filter(p => { const r = registry.find(x => x.name === p.name); return !p.is_local && !(r && r.free); });
   const local = providers.filter(p => p.is_local);
+
+  const enabledCount = providers.filter(p => p.enabled).length;
 
   function provStatus(p) {
     if (!p.enabled) return { dot: 'status-off', label: 'Disabled' };
@@ -235,33 +240,61 @@ async function renderProviders(el) {
   function renderCard(p, i) {
     const reg = registry.find(r => r.name === p.name) || {};
     const st = provStatus(p);
+    const isFree = reg.free;
     return `<div class="prov-card ${p.enabled ? '' : 'disabled'} prov-${st.dot}" data-name="${p.name}" style="animation-delay:${i * 0.03}s">
-      <div class="prov-rank">#${i + 1}</div>
       <div class="prov-status-dot ${st.dot}" title="${st.label}"></div>
       <div class="prov-info">
-        <div class="prov-name">${p.display_name} <span class="prov-badge">${p.is_local ? '🏠 Local' : '☁️ Cloud'}</span></div>
+        <div class="prov-name">${p.display_name}
+          ${isFree ? '<span class="prov-badge prov-badge-free">🆓 FREE</span>' : ''}
+          ${p.is_local ? '<span class="prov-badge prov-badge-local">🏠 LOCAL</span>' : ''}
+          ${!isFree && !p.is_local ? '<span class="prov-badge prov-badge-paid">💎 PAID</span>' : ''}
+        </div>
         <div class="prov-tagline">${reg.tagline || reg.description || ''}</div>
         <div class="prov-model">Model: <code>${p.model}</code></div>
-        <div class="prov-docs"><a href="${reg.docs || '#'}" target="_blank">📖 Docs</a></div>
       </div>
       <div class="prov-actions">
-        <button onclick="moveProv('${p.name}','up')" title="Move up">⬆️</button>
-        <button onclick="moveProv('${p.name}','down')" title="Move down">⬇️</button>
-        <button onclick="toggleProv('${p.name}')" title="Toggle">${p.enabled ? '✅' : '❌'}</button>
-        ${!p.is_local ? `<button onclick="promptSetKey('${p.name}','${p.display_name}')" title="Set key">🔑</button>` : ''}
+        <button onclick="toggleProv('${p.name}')" title="Toggle" class="prov-toggle-btn ${p.enabled ? 'active' : ''}">${p.enabled ? 'ON' : 'OFF'}</button>
+        ${!p.is_local ? `<button onclick="promptSetKey('${p.name}','${p.display_name}')" title="Set API key">🔑</button>` : ''}
         <button onclick="promptSetModel('${p.name}','${p.display_name}')" title="Change model">📊</button>
-        <button onclick="testProvider('${p.name}')" title="Test connection" id="test-btn-${p.name}">🏓</button>
+        <button onclick="testProvider('${p.name}')" title="Test" id="test-btn-${p.name}">🏓</button>
+        <a href="${reg.docs || '#'}" target="_blank" title="Docs" class="prov-doc-link">📖</a>
       </div>
     </div>`;
   }
 
+  function renderSection(id, icon, label, items, badgeClass, open = true) {
+    const enabledInGroup = items.filter(p => p.enabled).length;
+    return `
+      <div class="prov-section">
+        <div class="prov-section-header" onclick="toggleProvSection('${id}')">
+          <span class="prov-section-icon">${icon}</span>
+          <span class="prov-section-label">${label}</span>
+          <span class="badge ${badgeClass}">${enabledInGroup}/${items.length} enabled</span>
+          <span class="prov-section-arrow ${open ? 'open' : ''}" id="prov-arrow-${id}">▸</span>
+        </div>
+        <div class="prov-section-body ${open ? 'open' : ''}" id="prov-body-${id}">
+          ${items.map((p, i) => renderCard(p, i)).join('') || '<div style="padding:12px;color:var(--text2);font-style:italic">No providers in this category</div>'}
+        </div>
+      </div>`;
+  }
+
   el.innerHTML = `
-    <div class="section-title"><span class="icon">🔧</span> LLM Providers <span class="badge badge-blue">${providers.length} total</span></div>
-    <p style="color:var(--text2);margin-bottom:16px">Requests try each enabled provider in order with automatic fallback. Test connections with 🏓.</p>
-    <div class="prov-group-label">☁️ Cloud Providers (${cloud.length})</div>
-    <div id="prov-list-cloud">${cloud.map((p, i) => renderCard(p, i)).join('')}</div>
-    <div class="prov-group-label" style="margin-top:20px">🏠 Local Providers (${local.length})</div>
-    <div id="prov-list-local">${local.map((p, i) => renderCard(p, cloud.length + i)).join('')}</div>`;
+    <div class="section-title"><span class="icon">🔧</span> LLM Providers
+      <span class="badge badge-blue">${providers.length} total</span>
+      <span class="badge badge-green">${enabledCount} enabled</span>
+    </div>
+    <p style="color:var(--text2);margin-bottom:16px">Requests try each enabled provider in priority order with automatic fallback.</p>
+    ${renderSection('free', '🆓', 'Free Tier', free, 'badge-green', true)}
+    ${renderSection('paid', '💎', 'Premium', paid, 'badge-purple', true)}
+    ${renderSection('local', '🏠', 'Local', local, 'badge-orange', true)}`;
+}
+
+function toggleProvSection(id) {
+  const body = document.getElementById(`prov-body-${id}`);
+  const arrow = document.getElementById(`prov-arrow-${id}`);
+  if (!body) return;
+  body.classList.toggle('open');
+  arrow.classList.toggle('open');
 }
 
 async function testProvider(name) {
@@ -282,8 +315,13 @@ async function moveProv(name, dir) { await PUT(`/providers/${name}/reorder`, { d
 
 function promptSetKey(name, displayName) {
   const reg = state.registry.find(r => r.name === name) || {};
+  const keyLink = reg.keyUrl || reg.docs || '#';
   showModal(`🔑 Set API Key — ${displayName}`, `
-    <p style="margin-bottom:12px;color:var(--text2)">Get your key from: <a href="${reg.docs || '#'}" target="_blank" style="color:var(--cyan)">${reg.docs || 'provider docs'}</a></p>
+    <p style="margin-bottom:12px;color:var(--text2)">
+      <a href="${keyLink}" target="_blank" style="color:var(--cyan);font-weight:600;text-decoration:none;display:inline-flex;align-items:center;gap:4px">
+        🔗 Get your API key here ↗
+      </a>
+    </p>
     <div class="form-group">
       <label class="form-label">API Key</label>
       <input class="input" id="modal-key" type="password" placeholder="sk-..." style="font-family:monospace">

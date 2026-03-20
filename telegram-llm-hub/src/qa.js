@@ -16,11 +16,11 @@ try { await mkdir(SCREENSHOTS_DIR, { recursive: true }); } catch {}
 export const qa = {
   // Run a CLI command and return output
   // Uses spawn with piped stdin to auto-answer Y/N prompts
-  async runCommand(command, cwd = process.cwd(), timeout = 30000) {
+  async runCommand(command, cwd = process.cwd(), timeout = 30000, env = null) {
     return new Promise((resolve) => {
       const proc = spawn(command, {
         cwd, shell: true, stdio: ['pipe', 'pipe', 'pipe'],
-        env: process.env,
+        env: env || process.env,
       });
       let stdout = '', stderr = '';
       // Auto-answer any Y/N prompts

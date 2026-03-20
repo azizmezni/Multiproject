@@ -107,9 +107,11 @@ export function createDashboard(port = 9999) {
     const providers = llm.getProviders(userId);
     const registry = Object.entries(PROVIDER_REGISTRY).map(([k, v]) => ({
       name: k, displayName: v.name, models: v.models, docs: v.docs,
+      keyUrl: v.keyUrl || v.docs || '',
       description: v.description, tagline: v.tagline || '', isLocal: !!v.isLocal,
       modelGroups: v.modelGroups || null,
       dynamicModels: !!v.dynamicModels,
+      free: !!(v.tagline && (v.tagline.includes('Free') || v.tagline.includes('free'))),
     }));
     const lastUsed = llm.getLastUsedProvider(userId);
     res.json({ providers, registry, lastUsed });

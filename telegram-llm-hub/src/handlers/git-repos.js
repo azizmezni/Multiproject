@@ -1,10 +1,37 @@
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
-import { existsSync } from 'fs';
+import { existsSync, readFileSync } from 'fs';
 import { spawn } from 'child_process';
 import { safeSend, stripMd } from '../bot-helpers.js';
 import { gitRepoManager, analyzeRepo, generateRunPlan, diagnoseStepFailure } from '../git-repos.js';
 import { matchKnownError, isStepSkippable } from '../smart-fix.js';
+
+/**
+ * Load .env file from a directory and merge with process.env.
+ * Returns a new env object (does NOT mutate process.env).
+ */
+function loadRepoEnv(repoDir) {
+  const envPath = join(repoDir, '.env');
+  const env = { ...process.env };
+  if (!existsSync(envPath)) return env;
+  try {
+    const content = readFileSync(envPath, 'utf-8');
+    for (const line of content.split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('#')) continue;
+      const eqIdx = trimmed.indexOf('=');
+      if (eqIdx === -1) continue;
+      const key = trimmed.slice(0, eqIdx).trim();
+      let val = trimmed.slice(eqIdx + 1).trim();
+      // Strip surrounding quotes
+      if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+        val = val.slice(1, -1);
+      }
+      if (key && val) env[key] = val;
+    }
+  } catch {}
+  return env;
+}
 
 const __handlerDir = dirname(fileURLToPath(import.meta.url));
 const REPOS_DIR = join(__handlerDir, '..', '..', 'repos');
@@ -22,12 +49,12 @@ function detectPort(output) {
  * Spawn the final "run" step as a background server process.
  * Watches stdout/stderr for ~8s to detect port or crash.
  */
-function spawnServerStep(cmd, repo, runningGitRepos, ctx) {
+function spawnServerStep(cmd, repo, runningGitRepos, ctx, env = null) {
   return new Promise((resolve) => {
     const proc = spawn(cmd, {
       cwd: repo.clone_dir, shell: true,
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: process.env,
+      env: env || loadRepoEnv(repo.clone_dir),
     });
 
     let output = '';
@@ -223,6 +250,9 @@ export function registerGitRepos(bot, shared) {
 
     await ctx.editMessageText(`🧠 Asking LLM how to run *${stripMd(repo.name)}*...`, { parse_mode: 'Markdown' });
 
+    // Load repo's .env file so spawned processes get repo-specific env vars
+    const repoEnv = loadRepoEnv(repo.clone_dir);
+
     // Step 1: Ask LLM for a run plan
     let plan;
     try {
@@ -262,7 +292,7 @@ export function registerGitRepos(bot, shared) {
       while (true) {
         // For the final step (likely a server), spawn as background and detect port
         if (isLastStep) {
-          const serverResult = await spawnServerStep(currentCmd, repo, runningGitRepos, ctx);
+          const serverResult = await spawnServerStep(currentCmd, repo, runningGitRepos, ctx, repoEnv);
           if (serverResult.ok) {
             succeeded = true;
             if (serverResult.port) {
@@ -278,7 +308,7 @@ export function registerGitRepos(bot, shared) {
         }
 
         const timeout = isLastStep ? 15000 : 120000;
-        const result = isLastStep ? { ok: false, stderr: 'Server failed to start', stdout: '', code: -1 } : await qa.runCommand(currentCmd, repo.clone_dir, timeout);
+        const result = isLastStep ? { ok: false, stderr: 'Server failed to start', stdout: '', code: -1 } : await qa.runCommand(currentCmd, repo.clone_dir, timeout, repoEnv);
 
         if (result.ok) {
           const out = (result.stdout || '').substring(0, 500);
@@ -313,7 +343,7 @@ export function registerGitRepos(bot, shared) {
 
             for (const fc of (knownFix.fix_commands || [])) {
               await ctx.reply(`> \`${fc}\``);
-              await qa.runCommand(fc, repo.clone_dir, 60000);
+              await qa.runCommand(fc, repo.clone_dir, 60000, repoEnv);
             }
             if (knownFix.retry_cmd) {
               currentCmd = knownFix.retry_cmd;
@@ -362,7 +392,7 @@ export function registerGitRepos(bot, shared) {
 
           for (const fc of (fix.fix_commands || [])) {
             await ctx.reply(`> \`${fc}\``);
-            const fcResult = await qa.runCommand(fc, repo.clone_dir, 60000);
+            const fcResult = await qa.runCommand(fc, repo.clone_dir, 60000, repoEnv);
             if (!fcResult.ok && fcResult.stderr) {
               await ctx.reply(`⚠️ \`${fcResult.stderr.substring(0, 150)}\``);
             }

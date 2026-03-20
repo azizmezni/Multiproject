@@ -19,6 +19,12 @@ const PROVIDER_DEFAULTS = [
   { name: 'ollama', envKey: null, model: 'llama3.2', priority: 13, isLocal: true },
   { name: 'ollama-cloud', envKey: 'OLLAMA_CLOUD_API_KEY', model: 'deepseek-v3.1:671b-cloud', priority: 14 },
   { name: 'lmstudio', envKey: null, model: 'default', priority: 15, isLocal: true },
+  { name: 'sambanova', envKey: 'SAMBANOVA_API_KEY', model: 'Meta-Llama-3.3-70B-Instruct', priority: 16 },
+  { name: 'huggingface', envKey: 'HF_API_KEY', model: 'meta-llama/Llama-3.3-70B-Instruct', priority: 17 },
+  { name: 'chutes', envKey: 'CHUTES_API_KEY', model: 'deepseek-ai/DeepSeek-V3-0324', priority: 18 },
+  { name: 'nvidia', envKey: 'NVIDIA_API_KEY', model: 'meta/llama-3.3-70b-instruct', priority: 19 },
+  { name: 'hyperbolic', envKey: 'HYPERBOLIC_API_KEY', model: 'meta-llama/Llama-3.3-70B-Instruct', priority: 20 },
+  { name: 'glhf', envKey: 'GLHF_API_KEY', model: 'hf:meta-llama/Llama-3.3-70B-Instruct', priority: 21 },
 ];
 
 // Providers that support vision input
